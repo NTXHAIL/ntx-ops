@@ -1,0 +1,360 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  ESTIMATOR
+}
+
+enum EstimateStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  DECLINED
+}
+
+enum ClaimStatus {
+  OPEN
+  PENDING
+  IN_REVIEW
+  CLOSED
+}
+
+enum DentSize {
+  DIME
+  NICKEL
+  QUARTER
+  HALF_DOLLAR
+}
+
+enum LineItemType {
+  PDR_PANEL
+  OVERSIZED
+  LABOR
+  CUSTOM
+  CONVENTIONAL
+  REPLACE
+}
+
+enum LaborRateType {
+  HOURLY
+  FLAT
+}
+
+enum OversizedKind {
+  OS
+  DOS
+  OS_2X
+  OS_3X
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  name         String
+  role         Role       @default(ESTIMATOR)
+  createdAt    DateTime   @default(now())
+  estimates    Estimate[]
+}
+
+enum StormStatus {
+  DETECTED
+  APPROVED
+  ACTIVE
+  CLOSED
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  BOOKED
+  ESTIMATED
+  WON
+  LOST
+}
+
+enum InsuranceAnswer {
+  YES
+  NO
+  NOT_SURE
+}
+
+enum ContactMethod {
+  PHONE
+  TEXT
+  EMAIL
+}
+
+model Customer {
+  id             String     @id @default(cuid())
+  name           String
+  phonePrimary   String?
+  phoneSecondary String?
+  emailPrimary   String?
+  emailSecondary String?
+  street         String?
+  city           String?
+  state          String?
+  zip            String?
+  notes          String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  vehicles       Vehicle[]
+  estimates      Estimate[]
+  claims         Claim[]
+  leads          Lead[]
+}
+
+model Vehicle {
+  id         String     @id @default(cuid())
+  customerId String
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  year       String?
+  make       String?
+  model      String?
+  vin        String?
+  bodyClass  String?
+  color      String?
+  notes      String?
+  createdAt  DateTime   @default(now())
+  estimates  Estimate[]
+  claims     Claim[]
+}
+
+model Claim {
+  id                String     @id @default(cuid())
+  claimNumber       String
+  insuranceCarrier  String?
+  adjusterName      String?
+  adjusterPhone     String?
+  adjusterEmail     String?
+  deductibleCents   Int        @default(0)
+  dateOfLoss        DateTime?
+  status            ClaimStatus @default(OPEN)
+  notes             String?
+  customerId        String
+  customer          Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  vehicleId         String?
+  vehicle           Vehicle?   @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  estimates         Estimate[]
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+}
+
+model Estimate {
+  id               String          @id @default(cuid())
+  estimateNumber   String          @unique
+  status           EstimateStatus  @default(DRAFT)
+  notes            String?
+  bodyStyle        String          @default("CAR")
+  carrierId        String          @default("state_farm")
+  customerId       String
+  customer         Customer        @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  vehicleId        String?
+  vehicle          Vehicle?        @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  claimId          String?
+  claim            Claim?          @relation(fields: [claimId], references: [id], onDelete: SetNull)
+  createdById      String
+  createdBy        User            @relation(fields: [createdById], references: [id])
+  lineItems        EstimateLineItem[]
+  photos           EstimatePhoto[]
+  pdrSubtotalCents Int             @default(0)
+  markupCents      Int             @default(0)
+  oversizedCents   Int             @default(0)
+  laborCents       Int             @default(0)
+  customCents      Int             @default(0)
+  conventionalCents Int            @default(0)
+  replaceCents     Int             @default(0)
+  totalCents       Int             @default(0)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+}
+
+model EstimateLineItem {
+  id                  String         @id @default(cuid())
+  estimateId          String
+  estimate            Estimate       @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  sortOrder           Int            @default(0)
+  type                LineItemType
+  description         String
+  panelCode           String?
+  dentCount           Int?
+  dentSize            DentSize?
+  oversizedKind       OversizedKind?
+  quantity            Int            @default(1)
+  matrixAmountCents   Int?
+  markupCodesJson     String         @default("[]")
+  markupPercentApplied Int           @default(0)
+  markupAmountCents   Int            @default(0)
+  laborRateId         String?
+  laborTimeId         String?
+  laborHours          Float?
+  laborRateCents      Int?
+  rateType            LaborRateType?
+  usedCatalogRate     Boolean        @default(false)
+  usedCatalogTime     Boolean        @default(false)
+  rateOverridden      Boolean        @default(false)
+  timeOverridden      Boolean        @default(false)
+  auditNote           String?
+  unitAmountCents     Int            @default(0)
+  amountCents         Int            @default(0)
+  partsCents          Int            @default(0)
+  notes               String?
+}
+
+model EstimatePhoto {
+  id         String   @id @default(cuid())
+  estimateId String
+  estimate   Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  path       String
+  name       String
+  createdAt  DateTime @default(now())
+
+  @@index([estimateId])
+}
+
+model PdrMatrix {
+  id        String         @id @default(cuid())
+  name      String
+  carrierId String         @unique @default("state_farm")
+  isStub    Boolean        @default(false)
+  isActive  Boolean        @default(true)
+  rows      PdrMatrixRow[]
+}
+
+model PdrMatrixRow {
+  id            String    @id @default(cuid())
+  matrixId      String
+  matrix        PdrMatrix @relation(fields: [matrixId], references: [id], onDelete: Cascade)
+  panelCode     String
+  panelLabel    String
+  minDents      Int
+  maxDents      Int?
+  dimeCents     Int
+  nickelCents   Int
+  quarterCents  Int
+  halfDollarCents Int
+
+  @@index([matrixId, panelCode])
+}
+
+model MarkupRule {
+  id        String  @id @default(cuid())
+  code      String  @unique
+  name      String
+  percent   Int
+  isActive  Boolean @default(true)
+  sortOrder Int     @default(0)
+}
+
+model ShopSettings {
+  id                        String @id @default("default")
+  maxCombinedMarkupPercent  Int    @default(50)
+  oversizedOsCents          Int    @default(5000)
+  oversizedDosCents         Int    @default(10000)
+  oversizedTripleCents      Int    @default(15000)
+  nextEstimateSeq           Int    @default(1001)
+}
+
+model LaborRate {
+  id         String        @id @default(cuid())
+  name       String
+  type       LaborRateType
+  amountCents Int
+  isDefault  Boolean       @default(false)
+  isActive   Boolean       @default(true)
+  laborTimes LaborTime[]
+}
+
+model LaborTime {
+  id            String     @id @default(cuid())
+  name          String
+  category      String?
+  hours         Float
+  defaultRateId String?
+  defaultRate   LaborRate? @relation(fields: [defaultRateId], references: [id], onDelete: SetNull)
+  notes         String?
+  isActive      Boolean    @default(true)
+  sortOrder     Int        @default(0)
+}
+
+model Storm {
+  id            String      @id @default(cuid())
+  name          String
+  slug          String      @unique
+  occurredOn    DateTime
+  states        String
+  peakHailInches Float
+  source        String
+  status        StormStatus @default(DETECTED)
+  headline      String?
+  offerText     String
+  notes         String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  zips          StormZip[]
+  leads         Lead[]
+}
+
+model StormZip {
+  id             String  @id @default(cuid())
+  stormId        String
+  storm          Storm   @relation(fields: [stormId], references: [id], onDelete: Cascade)
+  zip            String
+  city           String
+  county         String
+  state          String
+  maxHailInches  Float
+  lat            Float
+  lon            Float
+
+  @@unique([stormId, zip])
+  @@index([stormId])
+}
+
+model Lead {
+  id                   String           @id @default(cuid())
+  stormId              String
+  storm                Storm            @relation(fields: [stormId], references: [id], onDelete: Cascade)
+  customerId           String
+  customer             Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  status               LeadStatus       @default(NEW)
+  vehicleDamaged       Boolean
+  insurance            InsuranceAnswer
+  vehicleYear          String?
+  vehicleMake          String?
+  vehicleModel         String?
+  vin                  String?
+  zip                  String
+  name                 String
+  phone                String
+  email                String?
+  preferredContact     ContactMethod
+  photoPath            String?
+  utmSource            String?
+  utmMedium            String?
+  utmCampaign          String?
+  utmTerm              String?
+  utmContent           String?
+  fbclid               String?
+  gclid                String?
+  smsConsent           Boolean          @default(false)
+  consentTextVersion   String?
+  consentText          String?
+  consentAt            DateTime?
+  consentIp            String?
+  consentUserAgent     String?
+  consentPageUrl       String?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  @@index([stormId, status])
+  @@index([customerId])
+}
