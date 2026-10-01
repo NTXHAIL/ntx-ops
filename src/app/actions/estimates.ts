@@ -1,6 +1,6 @@
 "use server";
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
@@ -22,13 +22,29 @@ import {
   oversizedUnitCents,
   type CalculatedLine,
 } from "@/lib/estimate-calc";
+import { normalizePhotoSlot } from "@/lib/estimate-photos";
 import type { EstimateDraftLine, EstimateDraftPayload } from "@/lib/estimate-types";
 import { DEFAULT_LABOR_RATE_CENTS } from "@/lib/hailspec";
 import { getCarrierMatrices, getShopCatalog, nextStatusOptions } from "@/lib/queries";
 
 export async function saveEstimateAction(
   payload: EstimateDraftPayload,
-): Promise<{ id: string; estimateNumber: string } | { error: string }> {
+): Promise<
+  | {
+      id: string;
+      estimateNumber: string;
+      photos: {
+        clientKey: string;
+        path: string;
+        name: string;
+        label: string;
+        slot: string;
+        panelCode: string;
+      }[];
+      error?: string;
+    }
+  | { error: string }
+> {
   const user = await requireUser();
 
   const ownerName = payload.ownerName?.trim() || "";
@@ -187,14 +203,35 @@ export async function saveEstimateAction(
     return { error: "Could not save that estimate. Check the lines and try again." };
   }
 
-  if (payload.photos) {
-    await persistEstimatePhotos(estimate.id, payload.photos);
+  let photos: {
+    clientKey: string;
+    path: string;
+    name: string;
+    label: string;
+    slot: string;
+    panelCode: string;
+  }[] = [];
+  try {
+    if (payload.photos) {
+      photos = await persistEstimatePhotos(estimate.id, payload.photos);
+    }
+    if (payload.photoFields) {
+      await persistPhotoFields(estimate.id, payload.photoFields);
+    }
+  } catch (error) {
+    console.error("saveEstimateAction photos failed", error);
+    return {
+      id: estimate.id,
+      estimateNumber: estimate.estimateNumber,
+      photos: [],
+      error: "The estimate saved, but the photos could not be stored. Try again.",
+    };
   }
 
   revalidatePath("/estimates");
   revalidatePath(`/estimates/${estimate.id}`);
   revalidatePath("/customers");
-  return { id: estimate.id, estimateNumber: estimate.estimateNumber };
+  return { id: estimate.id, estimateNumber: estimate.estimateNumber, photos };
 }
 
 export async function listSavedEstimatesAction() {
@@ -226,29 +263,109 @@ export async function deleteEstimateAction(id: string) {
 
 async function persistEstimatePhotos(
   estimateId: string,
-  photos: { path?: string; name: string; dataUrl?: string }[],
+  photos: NonNullable<EstimateDraftPayload["photos"]>,
 ) {
-  const kept: { path: string; name: string }[] = [];
-  for (const photo of photos) {
-    if (photo.path && !photo.dataUrl) {
-      kept.push({ path: photo.path, name: photo.name });
+  const kept: {
+    clientKey: string;
+    path: string;
+    name: string;
+    label: string;
+    slot: string;
+    panelCode: string;
+  }[] = [];
+  const dir = join(process.cwd(), "public", "estimate-photos", estimateId);
+  for (const [index, photo] of photos.entries()) {
+    const slot = normalizePhotoSlot(photo.slot);
+    const panelCode = slot === "PANEL" ? (photo.panelCode || "").slice(0, 40) : "";
+    const label = (photo.label || "").trim().slice(0, 120);
+    const name = (photo.name || "photo").slice(0, 180);
+    if (photo.path && !photo.dataUrl && isOwnPhotoPath(photo.path, estimateId)) {
+      kept.push({
+        clientKey: photo.clientKey || photo.path,
+        path: photo.path,
+        name,
+        label,
+        slot,
+        panelCode,
+      });
       continue;
     }
     if (!photo.dataUrl?.startsWith("data:image/")) continue;
-    const match = photo.dataUrl.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+    const match = photo.dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
     if (!match) continue;
     const ext = match[1].includes("png") ? "png" : match[1].includes("webp") ? "webp" : "jpg";
-    const name = `${randomUUID()}.${ext}`;
-    const dir = join(process.cwd(), "public", "estimate-photos", estimateId);
+    const fileName = `${randomUUID()}.${ext}`;
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, name), Buffer.from(match[2], "base64"));
-    kept.push({ path: `/estimate-photos/${estimateId}/${name}`, name: photo.name || name });
+    await writeFile(join(dir, fileName), Buffer.from(match[2], "base64"));
+    kept.push({
+      clientKey: photo.clientKey || `${slot}-${index}`,
+      path: `/estimate-photos/${estimateId}/${fileName}`,
+      name,
+      label,
+      slot,
+      panelCode,
+    });
   }
+  const previous = await prisma.estimatePhoto.findMany({
+    where: { estimateId },
+    select: { path: true },
+  });
+  const keptPaths = new Set(kept.map((photo) => photo.path));
   await prisma.estimatePhoto.deleteMany({ where: { estimateId } });
   if (kept.length) {
     await prisma.estimatePhoto.createMany({
-      data: kept.map((photo) => ({ estimateId, path: photo.path, name: photo.name })),
+      data: kept.map((photo, index) => ({
+        estimateId,
+        path: photo.path,
+        name: photo.name,
+        label: photo.label,
+        slot: photo.slot,
+        panelCode: photo.panelCode,
+        sortOrder: index,
+      })),
     });
+  }
+  for (const photo of previous) {
+    if (keptPaths.has(photo.path)) continue;
+    await removeStoredPhoto(photo.path, estimateId);
+  }
+  return kept;
+}
+
+async function persistPhotoFields(
+  estimateId: string,
+  fields: NonNullable<EstimateDraftPayload["photoFields"]>,
+) {
+  const rows = fields
+    .map((field) => {
+      const slot = normalizePhotoSlot(field.slot);
+      const panelCode = slot === "PANEL" ? (field.panelCode || "").slice(0, 40) : "";
+      const label = field.label.trim().slice(0, 80);
+      return { slot, panelCode, label };
+    })
+    .filter((field) => field.label);
+  await prisma.estimatePhotoField.deleteMany({ where: { estimateId } });
+  if (!rows.length) return;
+  await prisma.estimatePhotoField.createMany({
+    data: rows.map((field) => ({ estimateId, ...field })),
+  });
+}
+
+function isOwnPhotoPath(path: string, estimateId: string) {
+  return path.startsWith(`/estimate-photos/${estimateId}/`) && !path.includes("..");
+}
+
+async function removeStoredPhoto(path: string, estimateId: string) {
+  if (!isOwnPhotoPath(path, estimateId)) return;
+  const fileName = path.slice(`/estimate-photos/${estimateId}/`.length);
+  if (!fileName || fileName.includes("/")) return;
+  await unlink(join(process.cwd(), "public", "estimate-photos", estimateId, fileName)).catch(
+    () => undefined,
+  );
+  const dir = join(process.cwd(), "public", "estimate-photos", estimateId);
+  const left = await readdir(dir).catch(() => []);
+  if (left.length === 0) {
+    await rmdir(dir).catch(() => undefined);
   }
 }
 

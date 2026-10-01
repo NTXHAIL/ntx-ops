@@ -2,6 +2,8 @@ import { notFound } from "next/navigation";
 import { PrintButton } from "@/components/print-button";
 import { BRAND_EMAIL, BRAND_NAME, BRAND_PHONE, LEGAL_NAME, PRODUCT_NAME } from "@/lib/constants";
 import { prisma } from "@/lib/db";
+import { isBodyStyle } from "@/lib/body-styles";
+import { fieldLabelMap, groupDraftPhotos } from "@/lib/estimate-photos";
 import { formatDate, formatMoney, formatPhone, formatVehicle } from "@/lib/format";
 
 export default async function EstimatePrintPage({
@@ -18,6 +20,8 @@ export default async function EstimatePrintPage({
       claim: true,
       createdBy: true,
       lineItems: { orderBy: { sortOrder: "asc" } },
+      photos: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
+      photoFields: true,
     },
   });
   if (!estimate) notFound();
@@ -120,6 +124,34 @@ export default async function EstimatePrintPage({
             <span>{formatMoney(estimate.totalCents)}</span>
           </div>
         </section>
+
+        {estimate.photos.length > 0 ? (
+          <section className="mt-8">
+            <h2 className="text-xs font-semibold tracking-wide text-zinc-500 uppercase">Photos</h2>
+            {groupDraftPhotos(
+              estimate.photos,
+              fieldLabelMap(estimate.photoFields),
+              isBodyStyle(estimate.bodyStyle) ? estimate.bodyStyle : "CAR",
+            )
+              .filter((group) => group.photos.length > 0)
+              .map((group) => (
+                <div key={group.key} className="mt-3">
+                  <p className="text-sm font-medium">{group.label}</p>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    {group.photos.map((photo) => (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        key={photo.id}
+                        src={photo.path}
+                        alt={photo.label || group.label}
+                        className="aspect-square w-full rounded object-cover"
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
+          </section>
+        ) : null}
 
         {estimate.notes ? (
           <section className="mt-8 text-sm">

@@ -8,6 +8,7 @@ import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { nextStatusOptions } from "@/lib/queries";
 import { BODY_STYLE_LABELS, isBodyStyle } from "@/lib/body-styles";
+import { fieldLabelMap, groupDraftPhotos } from "@/lib/estimate-photos";
 import { ESTIMATE_STATUS_LABELS } from "@/lib/constants";
 import { formatDate, formatMoney, formatVehicle } from "@/lib/format";
 import { cn } from "cn";
@@ -29,11 +30,19 @@ export default async function EstimateDetailPage({
       claim: true,
       createdBy: true,
       lineItems: { orderBy: { sortOrder: "asc" } },
+      photos: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
+      photoFields: true,
     },
   });
   if (!estimate) notFound();
 
   const next = nextStatusOptions(estimate.status);
+  const bodyStyle = isBodyStyle(estimate.bodyStyle) ? estimate.bodyStyle : "CAR";
+  const photoGroups = groupDraftPhotos(
+    estimate.photos,
+    fieldLabelMap(estimate.photoFields),
+    bodyStyle,
+  ).filter((group) => group.photos.length > 0);
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -132,6 +141,34 @@ export default async function EstimateDetailPage({
           </tbody>
         </table>
       </section>
+
+      {photoGroups.length > 0 ? (
+        <section className="space-y-4">
+          <h2 className="text-sm font-semibold">Photos</h2>
+          {photoGroups.map((group) => (
+            <div key={group.key}>
+              <p className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                {group.label}
+              </p>
+              <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+                {group.photos.map((photo) => (
+                  <li key={photo.id} className="min-w-0">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={photo.path}
+                      alt={photo.label || group.label}
+                      className="aspect-square w-full rounded-lg object-cover"
+                    />
+                    {photo.label ? (
+                      <p className="mt-1 truncate text-xs text-muted-foreground">{photo.label}</p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </section>
+      ) : null}
 
       <section className="grid gap-2 rounded-xl bg-[var(--nav)] p-5 text-white sm:grid-cols-3">
         <Total label="PDR subtotal" value={estimate.pdrSubtotalCents} />

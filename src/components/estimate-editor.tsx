@@ -1,7 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState, startTransition } from "react";
 import { useRouter } from "next/navigation";
 import JSZip from "jszip";
 import {
@@ -11,6 +10,7 @@ import {
 } from "@/app/actions/estimates";
 import { decodeVinAction } from "@/app/actions/vin";
 import { CarSilhouette } from "@/components/car-silhouette";
+import { PanelPhotoField, PhotoSections, filesToDraftPhotos, photoCountForPanel } from "@/components/photo-fields";
 import { PanelSheet } from "@/components/panel-sheet";
 import { SearchSelect } from "@/components/search-select";
 import { BODY_STYLES, bodyStyleFromClass, type BodyStyle } from "@/lib/body-styles";
@@ -24,6 +24,16 @@ import {
   calculateReplaceLine,
   type CalculatedLine,
 } from "@/lib/estimate-calc";
+import { clearLocalDraft, readLocalDraft, writeLocalDraft } from "@/lib/estimate-local-draft";
+import type { LocalEstimateDraft } from "@/lib/estimate-local-draft";
+import {
+  mergeSavedPhotos,
+  normalizePhotoSlot,
+  photoFieldKey,
+  resolveFieldLabel,
+  type DraftPhoto,
+  type PhotoSlot,
+} from "@/lib/estimate-photos";
 import type { EstimateDraftLine, EstimateDraftPayload } from "@/lib/estimate-types";
 import { formatMoney, formatVehicle } from "@/lib/format";
 import {
@@ -97,7 +107,57 @@ type EditorSettings = {
   defaultHourlyCents: number;
 };
 
-type Photo = { url: string; name: string; path?: string; dataUrl?: string };
+type IncomingPhoto = {
+  url: string;
+  name: string;
+  path?: string;
+  dataUrl?: string;
+  label?: string;
+  slot?: string;
+  panelCode?: string;
+};
+
+type SaveDraft = LocalEstimateDraft & { activeRows: MatrixRow[] };
+
+function vehicleSnapshot(
+  customers: CustomerOption[],
+  customerId: string,
+  vehicleId: string,
+) {
+  const selected = customers
+    .find((item) => item.id === customerId)
+    ?.vehicles.find((item) => item.id === vehicleId);
+  return {
+    vin: selected?.vin ?? "",
+    year: selected?.year ?? "",
+    make: selected?.make ?? "",
+    model: selected?.model ?? "",
+    bodyClass: selected?.bodyClass ?? "",
+  };
+}
+
+function draftSignature(draft: SaveDraft) {
+  return JSON.stringify({
+    customerId: draft.customerId,
+    vehicleId: draft.vehicleId,
+    claimId: draft.claimId,
+    ownerName: draft.ownerName,
+    claimNumber: draft.claimNumber,
+    notes: draft.notes,
+    bodyStyle: draft.bodyStyle,
+    carrierId: draft.carrierId,
+    vehicleFields: draft.vehicleFields,
+    panels: draft.panels,
+    fieldLabels: draft.fieldLabels,
+    photos: draft.photos.map((photo) => ({
+      key: photo.key,
+      label: photo.label,
+      slot: photo.slot,
+      panelCode: photo.panelCode,
+      name: photo.name,
+    })),
+  });
+}
 
 type CarrierMatrix = { carrierId: string; name: string; isStub: boolean; rows: MatrixRow[] };
 
@@ -123,8 +183,10 @@ export function EstimateEditor({
   settings,
   initial,
   initialPhotos = [],
+  initialPhotoFields = [],
   initialOwner = "",
   initialClaimNumber = "",
+  backHref = "/estimates",
 }: {
   customers: CustomerOption[];
   matrixRows: MatrixRow[];
@@ -134,13 +196,17 @@ export function EstimateEditor({
   laborTimes: LaborTimeOption[];
   settings: EditorSettings;
   initial?: EstimateDraftPayload;
-  initialPhotos?: Photo[];
+  initialPhotos?: IncomingPhoto[];
+  initialPhotoFields?: { slot: string; panelCode?: string; label: string }[];
   initialOwner?: string;
   initialClaimNumber?: string;
+  backHref?: string;
 }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">(
+    initial?.id ? "saved" : "idle",
+  );
   const [estimateId, setEstimateId] = useState(initial?.id);
   const [view, setView] = useState<"estimate" | "review">("estimate");
   const [customerId, setCustomerId] = useState(initial?.customerId ?? "");
@@ -156,12 +222,39 @@ export function EstimateEditor({
   const [savedRows, setSavedRows] = useState<SavedRow[]>([]);
   const [savedLoading, setSavedLoading] = useState(false);
   const [selectedPanel, setSelectedPanel] = useState<HsKey | null>(null);
-  const [photos, setPhotos] = useState<Photo[]>(initialPhotos);
+  const [photos, setPhotos] = useState<DraftPhoto[]>(() =>
+    initialPhotos.map((photo, index) => ({
+      key: photo.path || `photo-${index}`,
+      url: photo.url,
+      name: photo.name,
+      path: photo.path,
+      dataUrl: photo.dataUrl,
+      label: photo.label ?? "",
+      slot: normalizePhotoSlot(photo.slot),
+      panelCode: photo.slot === "PANEL" ? photo.panelCode || "" : "",
+    })),
+  );
+  const [fieldLabels, setFieldLabels] = useState<Record<string, string>>(() => {
+    const labels: Record<string, string> = {};
+    for (const field of initialPhotoFields) {
+      const key = photoFieldKey(field.slot, field.panelCode || "");
+      if (field.label.trim()) labels[key] = field.label;
+    }
+    return labels;
+  });
   const [emailTo, setEmailTo] = useState("");
   const [emailDone, setEmailDone] = useState(false);
   const [vinMessage, setVinMessage] = useState<string | null>(null);
   const [vinOk, setVinOk] = useState(false);
   const skipAutosave = useRef(true);
+  const estimateIdRef = useRef(initial?.id);
+  const photosRef = useRef<DraftPhoto[]>([]);
+  const draftRef = useRef<SaveDraft | null>(null);
+  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const saveTimer = useRef<number | null>(null);
+  const echoPhotos = useRef(false);
+  const restoredUnsynced = useRef(false);
+  const [draftReady, setDraftReady] = useState(false);
   const defaultRate = DEFAULT_LABOR_RATE_CENTS;
   const [panels, setPanels] = useState<Record<HsKey, HsPanelState>>(() =>
     inflateHsPanels(initial?.lines ?? [], initial?.bodyStyle ?? "CAR", matrixRows, defaultRate),
@@ -178,26 +271,9 @@ export function EstimateEditor({
   );
 
   const customer = customers.find((item) => item.id === customerId);
-  const [vehicleFields, setVehicleFields] = useState({
-    vin: "",
-    year: "",
-    make: "",
-    model: "",
-    bodyClass: "",
-  });
-  const [vehicleTouched, setVehicleTouched] = useState(false);
-
-  useEffect(() => {
-    const selected = customer?.vehicles.find((item) => item.id === vehicleId);
-    if (!selected || vehicleTouched) return;
-    setVehicleFields({
-      vin: selected.vin ?? "",
-      year: selected.year ?? "",
-      make: selected.make ?? "",
-      model: selected.model ?? "",
-      bodyClass: selected.bodyClass ?? "",
-    });
-  }, [customer, vehicleId, vehicleTouched]);
+  const [vehicleFields, setVehicleFields] = useState(() =>
+    vehicleSnapshot(customers, initial?.customerId ?? "", initial?.vehicleId ?? ""),
+  );
 
   useEffect(() => {
     document.documentElement.dataset.editorReady = "true";
@@ -212,7 +288,6 @@ export function EstimateEditor({
     if (next) setOwnerName(next.name);
     const nextVehicle = next?.vehicles[0];
     setVehicleId(nextVehicle?.id ?? "");
-    setVehicleTouched(false);
     setVehicleFields({
       vin: nextVehicle?.vin ?? "",
       year: nextVehicle?.year ?? "",
@@ -290,94 +365,306 @@ export function EstimateEditor({
     setCarrierId(nextId);
   }
 
-  const persist = useCallback(
-    async (isAuto: boolean) => {
-      if (!ownerName.trim() && !customerId) {
-        if (!isAuto) setError("Enter an owner name before saving.");
-        return;
-      }
-      setError(null);
-      setSaveState("saving");
-      const result = await saveEstimateAction({
-        id: estimateId,
-        customerId,
-        vehicleId: vehicleId || null,
-        claimId: claimId || null,
-        notes,
-        bodyStyle,
-        carrierId,
-        ownerName,
-        claimNumber,
-        lines: flattenHsPanels(bodyStyle, panels, activeRows),
-        vehiclePatch:
-          vehicleFields.year || vehicleFields.make || vehicleFields.vin || vehicleFields.model
-            ? vehicleFields
-            : null,
-        photos: photos.map((photo) => ({
-          path: photo.path,
-          name: photo.name,
-          dataUrl: photo.dataUrl || (photo.url.startsWith("data:") ? photo.url : undefined),
-        })),
-      });
-      if ("error" in result && result.error) {
-        setSaveState("error");
-        if (!isAuto) setError(result.error);
-        return;
-      }
-      if ("id" in result) {
-        setEstimateId(result.id);
-        setSaveState("saved");
-        if (!initial?.id && result.id !== estimateId) {
-          router.replace(`/estimates/${result.id}/edit`);
-        }
-      }
-    },
-    [
-      activeRows,
+  useEffect(() => {
+    photosRef.current = photos;
+    draftRef.current = {
+      synced: false,
+      estimateId,
+      customerId,
+      vehicleId,
+      claimId,
+      ownerName,
+      claimNumber,
+      notes,
       bodyStyle,
       carrierId,
-      claimId,
-      claimNumber,
-      customerId,
-      estimateId,
-      initial?.id,
-      notes,
-      ownerName,
+      vehicleFields,
       panels,
       photos,
-      router,
-      vehicleFields,
-      vehicleId,
-    ],
+      fieldLabels,
+      activeRows,
+    };
+  });
+
+  const flushSave = useCallback(
+    (isAuto: boolean) => {
+      const run = saveChain.current.then(() => saveDraft(isAuto));
+      saveChain.current = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+
+      async function saveDraft(auto: boolean, attempt = 0): Promise<boolean> {
+        const draft = draftRef.current;
+        if (!draft) return false;
+        if (!draft.ownerName.trim() && !draft.customerId) {
+          if (!auto) setError("Enter an owner name before saving.");
+          return false;
+        }
+        const idAtStart = estimateIdRef.current;
+        setError(null);
+        setSaveState("saving");
+        const signature = draftSignature(draft);
+        const result = await saveEstimateAction({
+          id: idAtStart,
+          customerId: draft.customerId,
+          vehicleId: draft.vehicleId || null,
+          claimId: draft.claimId || null,
+          notes: draft.notes,
+          bodyStyle: draft.bodyStyle,
+          carrierId: draft.carrierId,
+          ownerName: draft.ownerName,
+          claimNumber: draft.claimNumber,
+          lines: flattenHsPanels(
+            draft.bodyStyle,
+            draft.panels as Record<HsKey, HsPanelState>,
+            draft.activeRows,
+          ),
+          vehiclePatch:
+            draft.vehicleFields.year ||
+            draft.vehicleFields.make ||
+            draft.vehicleFields.vin ||
+            draft.vehicleFields.model
+              ? draft.vehicleFields
+              : null,
+          photos: draft.photos.map((photo) => ({
+            clientKey: photo.key,
+            path: photo.path,
+            name: photo.name,
+            label: photo.label,
+            slot: photo.slot,
+            panelCode: photo.panelCode,
+            dataUrl: photo.dataUrl || (photo.url.startsWith("data:") ? photo.url : undefined),
+          })),
+          photoFields: Object.entries(draft.fieldLabels).flatMap(([key, label]) => {
+            const splitAt = key.indexOf(":");
+            const slot = key.slice(0, splitAt);
+            const panelCode = key.slice(splitAt + 1);
+            const trimmed = label.trim();
+            if (!trimmed || trimmed === resolveFieldLabel({}, slot, panelCode, draft.bodyStyle)) {
+              return [];
+            }
+            return [{ slot, panelCode, label: trimmed }];
+          }),
+        });
+        if (!("id" in result)) {
+          setSaveState("error");
+          setError(result.error);
+          return false;
+        }
+        estimateIdRef.current = result.id;
+        setEstimateId(result.id);
+        const merged = mergeSavedPhotos(photosRef.current, result.photos);
+        photosRef.current = merged;
+        if (draftRef.current) draftRef.current = { ...draftRef.current, photos: merged, estimateId: result.id };
+        echoPhotos.current = true;
+        setPhotos(merged);
+        if (result.error) {
+          setSaveState("error");
+          setError(result.error);
+          return false;
+        }
+        setSaveState("saved");
+        const latest = draftRef.current;
+        if (latest && draftSignature(latest) !== signature && attempt < 3) {
+          return saveDraft(true, attempt + 1);
+        }
+        if (!latest) return true;
+        const inSync = draftSignature(latest) === signature;
+        writeLocalDraft(result.id, {
+          ...latest,
+          synced: inSync,
+          estimateId: result.id,
+          photos: merged,
+        });
+        if (!idAtStart) clearLocalDraft(undefined);
+        if (inSync && window.location.pathname !== `/estimates/${result.id}/edit`) {
+          router.replace(`/estimates/${result.id}/edit`);
+        }
+        return true;
+      }
+    },
+    [router],
   );
 
   useEffect(() => {
+    const stored = readLocalDraft(initial?.id);
+    const timer = window.setTimeout(() => {
+      if (stored && !stored.synced) {
+        restoredUnsynced.current = true;
+        setCustomerId(stored.customerId || "");
+        setVehicleId(stored.vehicleId || "");
+        setClaimId(stored.claimId || "");
+        setOwnerName(stored.ownerName || "");
+        setClaimNumber(stored.claimNumber || "");
+        setNotes(stored.notes || "");
+        if (stored.bodyStyle) setBodyStyle(stored.bodyStyle);
+        if (stored.carrierId) setCarrierId(stored.carrierId);
+        setVehicleFields(stored.vehicleFields);
+        setPanels((current) => {
+          const next = { ...current };
+          for (const key of Object.keys(current) as HsKey[]) {
+            if (stored.panels?.[key]) next[key] = { ...current[key], ...stored.panels[key] };
+          }
+          return next;
+        });
+        if (stored.photos?.length) {
+          photosRef.current = stored.photos;
+          setPhotos(stored.photos);
+        }
+        if (stored.fieldLabels) setFieldLabels(stored.fieldLabels);
+        if (stored.estimateId) {
+          estimateIdRef.current = stored.estimateId;
+          setEstimateId(stored.estimateId);
+        }
+      }
+      setDraftReady(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [initial?.id]);
+
+  useEffect(() => {
+    if (!draftReady) return;
+    writeLocalDraft(estimateId, {
+      synced: false,
+      estimateId,
+      customerId,
+      vehicleId,
+      claimId,
+      ownerName,
+      claimNumber,
+      notes,
+      bodyStyle,
+      carrierId,
+      vehicleFields,
+      panels,
+      photos,
+      fieldLabels,
+    });
+  }, [
+    draftReady,
+    customerId,
+    vehicleId,
+    claimId,
+    ownerName,
+    claimNumber,
+    notes,
+    bodyStyle,
+    carrierId,
+    vehicleFields,
+    panels,
+    photos,
+    fieldLabels,
+    estimateId,
+  ]);
+
+  useEffect(() => {
+    if (!draftReady) return;
     if (skipAutosave.current) {
       skipAutosave.current = false;
+      if (!restoredUnsynced.current) return;
+    }
+    restoredUnsynced.current = false;
+    if (echoPhotos.current) {
+      echoPhotos.current = false;
       return;
     }
     if (!ownerName.trim() && !customerId) return;
-    const timer = window.setTimeout(() => {
-      void persist(true);
-    }, 1500);
-    return () => window.clearTimeout(timer);
-  }, [panels, ownerName, claimNumber, carrierId, vehicleFields, bodyStyle, notes, photos, customerId, persist]);
+    const pendingPhoto = photos.some((photo) => photo.dataUrl && !photo.path);
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      startTransition(() => {
+        void flushSave(true);
+      });
+    }, pendingPhoto ? 200 : 800);
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    };
+  }, [
+    draftReady,
+    panels,
+    ownerName,
+    claimNumber,
+    carrierId,
+    vehicleFields,
+    bodyStyle,
+    notes,
+    photos,
+    fieldLabels,
+    customerId,
+    vehicleId,
+    claimId,
+    flushSave,
+  ]);
 
-  function addPhotos(files: FileList | null) {
-    if (!files) return;
-    Array.from(files).forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const url = String(event.target?.result || "");
-        if (url) setPhotos((current) => [...current, { url, name: file.name, dataUrl: url }]);
-      };
-      reader.readAsDataURL(file);
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") {
+        if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        void flushSave(true);
+      }
+    };
+    window.addEventListener("pagehide", onHide);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, [flushSave]);
+
+  async function addPhotos(slot: PhotoSlot, panelCode: string, files: FileList | null) {
+    if (!files?.length) return;
+    const added = await filesToDraftPhotos(files, slot, panelCode);
+    if (!added.length) return;
+    setPhotos((current) => {
+      const next = [...current, ...added];
+      photosRef.current = next;
+      return next;
     });
+  }
+
+  function removePhoto(key: string) {
+    setPhotos((current) => {
+      const next = current.filter((photo) => photo.key !== key);
+      photosRef.current = next;
+      return next;
+    });
+  }
+
+  function captionPhoto(key: string, label: string) {
+    setPhotos((current) => {
+      const next = current.map((photo) => (photo.key === key ? { ...photo, label } : photo));
+      photosRef.current = next;
+      return next;
+    });
+  }
+
+  async function goBack() {
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    const hasWork =
+      photos.length > 0 ||
+      notes.trim().length > 0 ||
+      claimNumber.trim().length > 0 ||
+      vehicleFields.vin.trim().length > 0 ||
+      vehicleFields.year.trim().length > 0 ||
+      activeKeys.length > 0;
+    if (!ownerName.trim() && !customerId) {
+      if (hasWork) {
+        setShowVehicle(true);
+        setError("Enter an owner name so this estimate can save.");
+        return;
+      }
+      router.push(backHref);
+      return;
+    }
+    const saved = await flushSave(true);
+    if (!saved) return;
+    router.push(backHref);
   }
 
   function onVinChange(raw: string) {
     const vin = normalizeVin(raw).replace(/[^A-HJ-NPR-Z0-9]/g, "").slice(0, 17);
-    setVehicleTouched(true);
     setVehicleFields((current) => ({ ...current, vin }));
     if (vin.length !== 17) {
       setVinMessage(null);
@@ -435,10 +722,13 @@ export function EstimateEditor({
       const ok = window.confirm("Start a new estimate? Unsaved changes on this screen will be lost.");
       if (!ok) return;
     }
+    clearLocalDraft(estimateId);
+    clearLocalDraft(undefined);
     router.push("/estimates/new");
     if (!estimateId) {
       skipAutosave.current = true;
       setEstimateId(undefined);
+      estimateIdRef.current = undefined;
       setOwnerName("");
       setClaimNumber("");
       setCustomerId("");
@@ -448,6 +738,8 @@ export function EstimateEditor({
       setCarrierId("state_farm");
       setBodyStyle("CAR");
       setPhotos([]);
+      photosRef.current = [];
+      setFieldLabels({});
       setPanels(inflateHsPanels([], "CAR", activeRows, defaultRate));
       setVehicleFields({ vin: "", year: "", make: "", model: "", bodyClass: "" });
       setShowVehicle(true);
@@ -464,7 +756,12 @@ export function EstimateEditor({
       vin: vehicleFields.vin,
       claim: claimNumber,
       carrierLabel: carrier.label,
-      photos,
+      photos: photos.map((photo) => ({
+        url: photo.url,
+        name: [resolveFieldLabel(fieldLabels, photo.slot, photo.panelCode, bodyStyle), photo.label]
+          .filter(Boolean)
+          .join(" — "),
+      })),
       sections: report.sections,
       totalPriceCents: report.totalPriceCents,
       totalLaborCents: report.totalLaborCents,
@@ -517,7 +814,10 @@ export function EstimateEditor({
       .replace(/[^A-Za-z0-9_]+/g, "_") || "Photos";
     const folder = zip.folder(`NTXHail_Photos_${slug}`) ?? zip;
     for (const [index, photo] of photos.entries()) {
-      const name = photo.name || `photo-${index + 1}.jpg`;
+      const label = resolveFieldLabel(fieldLabels, photo.slot, photo.panelCode, bodyStyle)
+        .replace(/[^A-Za-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
+      const name = `${String(index + 1).padStart(2, "0")}-${label || "photo"}-${photo.name || "photo.jpg"}`;
       if (photo.dataUrl?.includes(",")) {
         folder.file(name, photo.dataUrl.split(",")[1], { base64: true });
       } else {
@@ -547,25 +847,38 @@ export function EstimateEditor({
     <div className="hs-app min-h-dvh w-full overflow-x-clip bg-[#f8fafc] text-slate-900">
       <header className="sticky top-0 z-50 bg-[#0a1628] px-3 py-3 shadow-[0_2px_12px_rgba(10,22,40,0.18)] lg:px-6">
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden>
-            <rect width="28" height="28" rx="5" fill="#0a1628" />
-            <text x="4" y="19" fontFamily="sans-serif" fontWeight="900" fontSize="13" fill="white">
-              NTX
-            </text>
-            <polygon points="20,6 24,14 20,22 16,14" fill="#dc2626" />
-          </svg>
-          <div>
-            <div className="text-[17px] leading-none font-black tracking-[1.5px] text-white">
-              HAILSPEC
-            </div>
-            <div className="text-[9px] font-bold tracking-widest text-blue-300 uppercase">
-              by NTX Hail
+        <div className="flex min-w-0 items-center gap-2">
+          <button
+            type="button"
+            data-action="back"
+            onClick={() => void goBack()}
+            className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-[10px] border border-white/25 bg-white px-3 text-sm font-bold text-[#0a1628]"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden>
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+            Back
+          </button>
+          <div className="hidden min-w-0 items-center gap-2.5 min-[480px]:flex">
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden>
+              <rect width="28" height="28" rx="5" fill="#0a1628" />
+              <text x="4" y="19" fontFamily="sans-serif" fontWeight="900" fontSize="13" fill="white">
+                NTX
+              </text>
+              <polygon points="20,6 24,14 20,22 16,14" fill="#dc2626" />
+            </svg>
+            <div>
+              <div className="text-[17px] leading-none font-black tracking-[1.5px] text-white">
+                HAILSPEC
+              </div>
+              <div className="text-[9px] font-bold tracking-widest text-blue-300 uppercase">
+                by NTX Hail
+              </div>
             </div>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          <SavePill state={saveState} />
+          <SavePill state={saveState} hasEstimate={Boolean(estimateId)} />
           <button
             type="button"
             onClick={() => void openSaved()}
@@ -580,12 +893,6 @@ export function EstimateEditor({
           >
             + New
           </button>
-          <Link
-            href="/estimates"
-            className="inline-flex min-h-11 items-center rounded-[10px] border border-white/20 bg-white/10 px-3 text-[12px] font-semibold text-white"
-          >
-            Jobs
-          </Link>
         </div>
         </div>
       </header>
@@ -708,7 +1015,6 @@ export function EstimateEditor({
               options={VEHICLE_YEARS}
               placeholder="Year"
               onChange={(year) => {
-                setVehicleTouched(true);
                 setVehicleFields((current) => ({ ...current, year }));
               }}
             />
@@ -718,7 +1024,6 @@ export function EstimateEditor({
               options={VEHICLE_MAKES}
               placeholder="Make"
               onChange={(make) => {
-                setVehicleTouched(true);
                 setVehicleFields((current) => ({
                   ...current,
                   make,
@@ -733,7 +1038,6 @@ export function EstimateEditor({
               disabled={!vehicleFields.make}
               placeholder="Model"
               onChange={(model) => {
-                setVehicleTouched(true);
                 setVehicleFields((current) => ({ ...current, model }));
               }}
             />
@@ -843,7 +1147,8 @@ export function EstimateEditor({
       </div>
 
       {view === "estimate" ? (
-        <div className="hs-page-pad mx-auto w-full max-w-6xl px-4 pt-4 md:grid md:grid-cols-2 md:items-start md:gap-6">
+        <div className="hs-page-pad">
+        <div className="mx-auto w-full max-w-6xl px-4 pt-4 md:grid md:grid-cols-2 md:items-start md:gap-6">
           <div>
           <div className="mb-4 flex gap-2">
             <Stat label="Panels" value={String(activeKeys.length)} />
@@ -888,60 +1193,6 @@ export function EstimateEditor({
           </div>
 
           <div>
-          <section className="mb-5">
-            <div className="mb-2 text-[10px] font-bold tracking-widest text-slate-400 uppercase">
-              Photos
-            </div>
-            <div className="flex gap-2">
-              <label className="flex min-h-11 flex-1 cursor-pointer items-center justify-center gap-2.5 rounded-xl border-[1.5px] border-dashed border-slate-300 bg-white py-4 text-[15px] font-semibold text-slate-400">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
-                  <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
-                  <circle cx="12" cy="13" r="4" />
-                </svg>
-                Camera
-                <input
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  className="hidden"
-                  onChange={(event) => addPhotos(event.target.files)}
-                />
-              </label>
-              <label className="flex min-h-11 flex-1 cursor-pointer items-center justify-center gap-2.5 rounded-xl border-[1.5px] border-dashed border-slate-300 bg-white py-4 text-[15px] font-semibold text-slate-400">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
-                  <rect x="3" y="3" width="18" height="18" rx="2" />
-                  <circle cx="8.5" cy="8.5" r="1.5" />
-                  <polyline points="21 15 16 10 5 21" />
-                </svg>
-                Gallery
-                <input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="hidden"
-                  onChange={(event) => addPhotos(event.target.files)}
-                />
-              </label>
-            </div>
-            {photos.length > 0 ? (
-              <div className="mt-2 flex gap-2 overflow-x-auto">
-                {photos.map((photo, index) => (
-                  <div key={`${photo.name}-${index}`} className="relative h-[72px] w-[72px] shrink-0 overflow-hidden rounded-lg">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={photo.url} alt={photo.name} className="h-full w-full object-cover" />
-                    <button
-                      type="button"
-                      className="hs-icon-xs absolute top-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/55 text-[11px] text-white"
-                      onClick={() => setPhotos((current) => current.filter((_, item) => item !== index))}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </section>
-
           {activeKeys.length > 0 ? (
             <section>
               <div className="mb-2 text-[10px] font-bold tracking-widest text-slate-400 uppercase">
@@ -969,6 +1220,9 @@ export function EstimateEditor({
                         {meta}
                         {panel.markupCodes.length ? " · add-on" : ""}
                         {panel.riEnabled ? " · R&I" : ""}
+                        {photoCountForPanel(photos, key)
+                          ? ` · ${photoCountForPanel(photos, key)} photo${photoCountForPanel(photos, key) === 1 ? "" : "s"}`
+                          : ""}
                       </div>
                     </div>
                     <div className="text-base font-extrabold text-[#2563eb]">
@@ -980,6 +1234,20 @@ export function EstimateEditor({
             </section>
           ) : null}
           </div>
+        </div>
+        <div className="mx-auto w-full max-w-6xl px-4 pt-2">
+          <PhotoSections
+            bodyStyle={bodyStyle}
+            photos={photos}
+            fieldLabels={fieldLabels}
+            onFieldLabel={(key, label) =>
+              setFieldLabels((current) => ({ ...current, [key]: label }))
+            }
+            onAdd={(slot, panelCode, files) => void addPhotos(slot, panelCode, files)}
+            onRemove={removePhoto}
+            onCaption={captionPhoto}
+          />
+        </div>
         </div>
       ) : (
         <div className="hs-page-pad mx-auto w-full max-w-4xl px-4 pt-4">
@@ -1148,35 +1416,42 @@ export function EstimateEditor({
               <p className="mb-4 text-[11px] leading-5 text-slate-400">
                 Opens your default mail app with the estimate pre-filled. You review and send from there.
               </p>
-              {photos.length > 0 ? (
-                <section className="mb-4">
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="text-[10px] font-bold tracking-widest text-slate-400 uppercase">
-                      Attached photos ({photos.length})
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void downloadZip()}
-                      className="text-[12px] font-bold text-[#2563eb]"
-                    >
-                      Download ZIP
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    {photos.map((photo, index) => (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        key={`${photo.name}-${index}`}
-                        src={photo.url}
-                        alt={photo.name}
-                        className="h-24 w-full rounded-lg object-cover"
-                      />
-                    ))}
-                  </div>
-                </section>
-              ) : null}
             </>
           )}
+          {photos.length > 0 ? (
+            <section className="mt-4 mb-4">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-[10px] font-bold tracking-widest text-slate-400 uppercase">
+                  Photos ({photos.length})
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void downloadZip()}
+                  className="min-h-11 text-[12px] font-bold text-[#2563eb]"
+                >
+                  Download ZIP
+                </button>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {photos.map((photo) => {
+                  const caption = [resolveFieldLabel(fieldLabels, photo.slot, photo.panelCode, bodyStyle), photo.label]
+                    .filter(Boolean)
+                    .join(" — ");
+                  return (
+                    <figure key={photo.key} className="min-w-0">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={photo.url}
+                        alt={caption || photo.name}
+                        className="h-24 w-full rounded-lg object-cover"
+                      />
+                      <figcaption className="mt-1 truncate text-[11px] text-slate-500">{caption}</figcaption>
+                    </figure>
+                  );
+                })}
+              </div>
+            </section>
+          ) : null}
         </div>
       )}
 
@@ -1188,15 +1463,19 @@ export function EstimateEditor({
           <div>
             <p className="text-[10px] font-bold tracking-wider text-slate-400 uppercase">Total</p>
             <p className="text-xl font-black text-[#2563eb]">{formatMoney(totals.totalCents)}</p>
+            <SavePill state={saveState} hasEstimate={Boolean(estimateId)} tone="light" />
           </div>
           <button
             type="button"
             data-action="save-estimate"
             disabled={saveState === "saving"}
-            onClick={() => void persist(false)}
+            onClick={() => {
+              if (saveTimer.current) window.clearTimeout(saveTimer.current);
+              void flushSave(false);
+            }}
             className="min-h-11 min-w-36 rounded-xl bg-[#2563eb] px-5 text-sm font-bold text-white shadow-[0_2px_8px_rgba(37,99,235,0.3)]"
           >
-            {saveState === "saving" ? "Saving…" : estimateId ? "Save draft" : "Save estimate"}
+            {saveState === "saving" ? "Saving..." : estimateId ? "Save draft" : "Save estimate"}
           </button>
         </div>
       </div>
@@ -1216,6 +1495,20 @@ export function EstimateEditor({
             defaultHourlyCents: defaultRate,
           }}
           hasSaved={hsPanelHasEntry(selectedState)}
+          photoSection={
+            <PanelPhotoField
+              panelCode={selectedPanel}
+              bodyStyle={bodyStyle}
+              photos={photos}
+              fieldLabels={fieldLabels}
+              onFieldLabel={(key, label) =>
+                setFieldLabels((current) => ({ ...current, [key]: label }))
+              }
+              onAdd={(files) => void addPhotos("PANEL", selectedPanel, files)}
+              onRemove={removePhoto}
+              onCaption={captionPhoto}
+            />
+          }
           onChange={(patch) => patchPanel(selectedPanel, patch)}
           onSave={() => setSelectedPanel(null)}
           onClose={() => setSelectedPanel(null)}
@@ -1314,13 +1607,43 @@ export function EstimateEditor({
   );
 }
 
-function SavePill({ state }: { state: "idle" | "saving" | "saved" | "error" }) {
-  if (state === "idle") return null;
+function SavePill({
+  state,
+  hasEstimate,
+  tone = "dark",
+}: {
+  state: "idle" | "saving" | "saved" | "error";
+  hasEstimate: boolean;
+  tone?: "dark" | "light";
+}) {
   const label =
-    state === "saving" ? "Saving…" : state === "saved" ? "✓ Saved" : "⚠ Error";
-  const color =
-    state === "saving" ? "text-blue-200" : state === "saved" ? "text-emerald-300" : "text-red-300";
-  return <span className={`text-[10px] font-bold ${color}`}>{label}</span>;
+    state === "saving" ? "Saving..." : state === "error" ? "Not saved" : hasEstimate || state === "saved" ? "Saved" : "Draft";
+  const dark =
+    state === "saving"
+      ? "bg-blue-500/25 text-blue-50"
+      : state === "error"
+        ? "bg-red-500/25 text-red-100"
+        : state === "saved" || hasEstimate
+          ? "bg-emerald-500/25 text-emerald-100"
+          : "bg-white/10 text-white/80";
+  const light =
+    state === "saving"
+      ? "text-blue-700"
+      : state === "error"
+        ? "text-red-600"
+        : "text-emerald-700";
+  return (
+    <span
+      data-save-state={state === "idle" && hasEstimate ? "saved" : state}
+      className={
+        tone === "light"
+          ? `text-[11px] font-bold ${light}`
+          : `inline-flex min-h-11 items-center rounded-full px-3 text-xs font-bold ${dark}`
+      }
+    >
+      {label}
+    </span>
+  );
 }
 
 function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {

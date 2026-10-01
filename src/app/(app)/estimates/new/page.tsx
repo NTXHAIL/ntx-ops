@@ -47,6 +47,7 @@ export default async function NewEstimatePage({
       initialClaimNumber={
         customer?.claims.find((claim) => claim.id === params.claimId)?.claimNumber ?? ""
       }
+      backHref={params.claimId ? `/claims/${params.claimId}` : "/estimates"}
       initial={{
         customerId: params.customerId ?? "",
         vehicleId: params.vehicleId || null,

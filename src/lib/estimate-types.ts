@@ -73,5 +73,14 @@ export type EstimateDraftPayload = {
   claimNumber?: string;
   lines: EstimateDraftLine[];
   vehiclePatch?: VehiclePatch | null;
-  photos?: { path?: string; name: string; dataUrl?: string }[];
+  photos?: {
+    clientKey?: string;
+    path?: string;
+    name: string;
+    dataUrl?: string;
+    label?: string;
+    slot?: string;
+    panelCode?: string;
+  }[];
+  photoFields?: { slot: string; panelCode?: string; label: string }[];
 };
