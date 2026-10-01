@@ -252,7 +252,7 @@ function PhotoField({
                 <img src={photo.url} alt={photo.label || photo.name} className="h-full w-full object-cover" />
                 <button
                   type="button"
-                  className="hs-icon-xs absolute top-1 right-1 flex h-11 w-11 items-center justify-center rounded-full bg-black/60 text-sm font-bold text-white"
+                  className="hs-icon-xs absolute top-1 right-1 flex h-11 w-11 items-center justify-center rounded-full bg-black text-lg font-bold text-white shadow"
                   aria-label={`Remove photo ${index + 1} from ${labelValue || defaultLabel}`}
                   onClick={() => onRemove(photo.key)}
                 >

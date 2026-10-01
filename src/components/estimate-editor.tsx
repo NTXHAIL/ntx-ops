@@ -465,8 +465,8 @@ export function EstimateEditor({
           return false;
         }
         const elapsed = Date.now() - savingShownAt;
-        if (elapsed < 400) {
-          await new Promise((resolve) => setTimeout(resolve, 400 - elapsed));
+        if (elapsed < 900) {
+          await new Promise((resolve) => setTimeout(resolve, 900 - elapsed));
         }
         setSaveState("saved");
         const latest = draftRef.current;
@@ -884,7 +884,7 @@ export function EstimateEditor({
             onClick={() => void openSaved()}
             className="min-h-11 rounded-[10px] border border-white/20 bg-white/10 px-3 text-[12px] font-semibold text-white"
           >
-            Saved
+            List
           </button>
           <button
             type="button"
@@ -1059,13 +1059,18 @@ export function EstimateEditor({
               </button>
             ))}
           </div>
-          <textarea
-            className="w-full rounded-lg border border-slate-200 bg-slate-50 p-2 text-base lg:col-span-2"
-            rows={2}
-            placeholder="Estimate notes"
-            value={notes}
-            onChange={(event) => setNotes(event.target.value)}
-          />
+          <label className="block space-y-1 lg:col-span-2">
+            <span className="text-[10px] font-bold tracking-widest text-slate-400 uppercase">
+              Notes
+            </span>
+            <textarea
+              className="w-full rounded-lg border border-slate-200 bg-slate-50 p-2 text-base"
+              rows={2}
+              placeholder="Estimate notes"
+              value={notes}
+              onChange={(event) => setNotes(event.target.value)}
+            />
+          </label>
           <button
             type="button"
             className="min-h-11 w-full rounded-lg bg-[#2563eb] py-2.5 text-sm font-bold text-white shadow-[0_2px_8px_rgba(37,99,235,0.3)] lg:col-span-2"
