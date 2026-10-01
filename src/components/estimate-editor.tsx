@@ -246,15 +246,13 @@ export function EstimateEditor({
   const [emailDone, setEmailDone] = useState(false);
   const [vinMessage, setVinMessage] = useState<string | null>(null);
   const [vinOk, setVinOk] = useState(false);
-  const skipAutosave = useRef(true);
+  const lastSavedSignature = useRef<string | null>(null);
   const estimateIdRef = useRef(initial?.id);
   const photosRef = useRef<DraftPhoto[]>([]);
   const draftRef = useRef<SaveDraft | null>(null);
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const saveTimer = useRef<number | null>(null);
   const echoPhotos = useRef(false);
-  const restoredUnsynced = useRef(false);
-  const [draftReady, setDraftReady] = useState(false);
   const defaultRate = DEFAULT_LABOR_RATE_CENTS;
   const [panels, setPanels] = useState<Record<HsKey, HsPanelState>>(() =>
     inflateHsPanels(initial?.lines ?? [], initial?.bodyStyle ?? "CAR", matrixRows, defaultRate),
@@ -405,6 +403,7 @@ export function EstimateEditor({
         const idAtStart = estimateIdRef.current;
         setError(null);
         setSaveState("saving");
+        const savingShownAt = Date.now();
         const signature = draftSignature(draft);
         const result = await saveEstimateAction({
           id: idAtStart,
@@ -465,6 +464,10 @@ export function EstimateEditor({
           setError(result.error);
           return false;
         }
+        const elapsed = Date.now() - savingShownAt;
+        if (elapsed < 400) {
+          await new Promise((resolve) => setTimeout(resolve, 400 - elapsed));
+        }
         setSaveState("saved");
         const latest = draftRef.current;
         if (latest && draftSignature(latest) !== signature && attempt < 3) {
@@ -472,6 +475,7 @@ export function EstimateEditor({
         }
         if (!latest) return true;
         const inSync = draftSignature(latest) === signature;
+        if (inSync) lastSavedSignature.current = draftSignature(latest);
         writeLocalDraft(result.id, {
           ...latest,
           synced: inSync,
@@ -492,7 +496,6 @@ export function EstimateEditor({
     const stored = readLocalDraft(initial?.id);
     const timer = window.setTimeout(() => {
       if (stored && !stored.synced) {
-        restoredUnsynced.current = true;
         setCustomerId(stored.customerId || "");
         setVehicleId(stored.vehicleId || "");
         setClaimId(stored.claimId || "");
@@ -519,13 +522,11 @@ export function EstimateEditor({
           setEstimateId(stored.estimateId);
         }
       }
-      setDraftReady(true);
     }, 0);
     return () => window.clearTimeout(timer);
   }, [initial?.id]);
 
   useEffect(() => {
-    if (!draftReady) return;
     writeLocalDraft(estimateId, {
       synced: false,
       estimateId,
@@ -543,7 +544,6 @@ export function EstimateEditor({
       fieldLabels,
     });
   }, [
-    draftReady,
     customerId,
     vehicleId,
     claimId,
@@ -560,16 +560,17 @@ export function EstimateEditor({
   ]);
 
   useEffect(() => {
-    if (!draftReady) return;
-    if (skipAutosave.current) {
-      skipAutosave.current = false;
-      if (!restoredUnsynced.current) return;
+    const draft = draftRef.current;
+    const signature = draft ? draftSignature(draft) : "";
+    if (lastSavedSignature.current === null) {
+      lastSavedSignature.current = signature;
+      return;
     }
-    restoredUnsynced.current = false;
-    if (echoPhotos.current) {
+    if (signature === lastSavedSignature.current) {
       echoPhotos.current = false;
       return;
     }
+    echoPhotos.current = false;
     if (!ownerName.trim() && !customerId) return;
     const pendingPhoto = photos.some((photo) => photo.dataUrl && !photo.path);
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
@@ -582,7 +583,6 @@ export function EstimateEditor({
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
     };
   }, [
-    draftReady,
     panels,
     ownerName,
     claimNumber,
@@ -726,7 +726,7 @@ export function EstimateEditor({
     clearLocalDraft(undefined);
     router.push("/estimates/new");
     if (!estimateId) {
-      skipAutosave.current = true;
+      lastSavedSignature.current = null;
       setEstimateId(undefined);
       estimateIdRef.current = undefined;
       setOwnerName("");
