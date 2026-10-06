@@ -1,14 +1,25 @@
 import { spawnSync } from "node:child_process";
 import { tsImport } from "tsx/esm/api";
 
+async function databaseModule() {
+  return tsImport("../src/lib/database-url.ts", import.meta.url);
+}
+
 export async function prepareDatabaseEnv() {
-  const { assertDatabaseEnv } = await tsImport("../src/lib/database-url.ts", import.meta.url);
+  const { assertDatabaseEnv } = await databaseModule();
   try {
     assertDatabaseEnv();
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);
   }
+}
+
+/** True when a pooled URL is set. A missing URL should skip migrate/seed, not fail the Vercel build. */
+export async function databaseReadyForMigrations() {
+  const { applyDatabaseEnv, databaseReady } = await databaseModule();
+  applyDatabaseEnv();
+  return databaseReady();
 }
 
 export function runCommand(args) {

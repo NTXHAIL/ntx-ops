@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { hasPooledDatabaseUrl } from "@/lib/database-presence";
 import { SESSION_COOKIE } from "@/lib/session";
 
 function isPublicPath(pathname: string) {
@@ -11,6 +12,13 @@ function isPublicPath(pathname: string) {
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  if (!hasPooledDatabaseUrl()) {
+    if (pathname === "/setup") return NextResponse.next();
+    const url = request.nextUrl.clone();
+    url.pathname = "/setup";
+    url.search = "";
+    return NextResponse.rewrite(url);
+  }
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   const isPublic = isPublicPath(pathname);
 

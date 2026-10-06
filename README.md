@@ -80,7 +80,7 @@ Seeded shop data includes three customers, one State Farm claim, three estimates
 | `npm test` | Pricing math tests (State Farm lookup, add-ons, R&R / Conventional / R&I, report lines) |
 | `npm run test:e2e` | Playwright: key pages at 390 / 768 / 1440px have no horizontal overflow; save bar and panel-editor footer stay in view |
 | `npm run lint` | ESLint |
-| `npm run build` | Migrate, seed when the database is empty, then production build |
+| `npm run build` | When a database URL is set: migrate, seed if the database is empty, then build. When it is missing: skip migrate and seed so the deploy can finish |
 | `npm run db:setup` | Apply migrations and seed when the database has no users |
 | `npm run db:seed` | Seed demo data only when the database has no users |
 | `npm run db:studio` | Prisma Studio |

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { DM_Sans, Geist_Mono } from "next/font/google";
+import { SetupRequired } from "@/components/setup-required";
 import { BRAND_NAME, PRODUCT_NAME } from "@/lib/constants";
+import { setupSteps } from "@/lib/setup-status";
 import "./globals.css";
 
 const dmSans = DM_Sans({
@@ -28,12 +30,15 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const steps = setupSteps();
   return (
     <html
       lang="en"
       className={`${dmSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className={`${dmSans.className} min-h-full`}>{children}</body>
+      <body className={`${dmSans.className} min-h-full`}>
+        {steps ? <SetupRequired steps={steps} /> : children}
+      </body>
     </html>
   );
 }

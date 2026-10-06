@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { resolveDatabaseUrls, withPrismaPoolParams } from "@/lib/database-url";
+import { hasPooledDatabaseUrl as hasPooledDatabaseUrlInProxy } from "@/lib/database-presence";
+import {
+  MIGRATION_SKIP_MESSAGE,
+  canMigrateDatabase,
+  hasPooledDatabaseUrl,
+  resolveDatabaseUrls,
+  withPrismaPoolParams,
+} from "@/lib/database-url";
 
 const POOLED =
   "postgresql://user:p%40ss@ep-abc-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require";
@@ -46,6 +53,45 @@ describe("resolveDatabaseUrls", () => {
       pooled: local,
       direct: local,
     });
+  });
+
+  it("does not migrate when the database URL is missing", () => {
+    expect(canMigrateDatabase(resolveDatabaseUrls({}))).toBe(false);
+    expect(
+      canMigrateDatabase(resolveDatabaseUrls({ DATABASE_URL: "  ", DIRECT_URL: "postgresql://old" })),
+    ).toBe(false);
+    expect(
+      canMigrateDatabase(resolveDatabaseUrls({ DIRECT_URL: "postgresql://old-supabase" })),
+    ).toBe(false);
+  });
+
+  it("migrates when a pooled URL is set", () => {
+    const local = "postgresql://hailops:hailops@localhost:5432/hailops";
+    expect(canMigrateDatabase(resolveDatabaseUrls({ DATABASE_URL: local }))).toBe(true);
+  });
+});
+
+describe("hasPooledDatabaseUrl", () => {
+  it("matches the proxy check, including a missing or blank URL", () => {
+    const cases = [
+      {},
+      { DATABASE_URL: "  " },
+      { DIRECT_URL: "postgresql://old" },
+      { DATABASE_URL: "postgresql://db/app" },
+      { POSTGRES_PRISMA_URL: "postgresql://db/app" },
+      { POSTGRES_URL: "postgresql://db/app" },
+    ];
+    for (const env of cases) {
+      expect(hasPooledDatabaseUrl(env)).toBe(hasPooledDatabaseUrlInProxy(env));
+    }
+  });
+});
+
+describe("migration skip message", () => {
+  it("says the deploy continues and names the Neon variables", () => {
+    expect(MIGRATION_SKIP_MESSAGE).toContain("Skipping prisma migrate deploy");
+    expect(MIGRATION_SKIP_MESSAGE).toContain("DATABASE_URL");
+    expect(MIGRATION_SKIP_MESSAGE).toContain("redeploy");
   });
 });
 

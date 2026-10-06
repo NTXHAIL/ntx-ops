@@ -18,6 +18,13 @@ const DIRECT_ENV_NAMES = [
 export const MISSING_DATABASE_MESSAGE =
   "Database is not configured. In the Vercel project, open the Storage tab, create a Neon Postgres database, and connect it to this project so DATABASE_URL and DATABASE_URL_UNPOOLED are set. Then redeploy. On your computer, set DATABASE_URL in .env. DATABASE_URL_UNPOOLED can be the same address.";
 
+export const MIGRATION_SKIP_MESSAGE = [
+  "No database URL found (looked for DATABASE_URL, POSTGRES_PRISMA_URL, and POSTGRES_URL).",
+  "Skipping prisma migrate deploy and the demo seed.",
+  "The site will still deploy. Opening it shows how to connect Neon Postgres from the Vercel Storage tab, connect a Blob store, and add AUTH_SECRET.",
+  "After those are connected, redeploy so the tables and demo shop are created.",
+].join("\n");
+
 export type DatabaseUrls = {
   pooled: string | undefined;
   direct: string | undefined;
@@ -95,10 +102,28 @@ export function applyDatabaseEnv(env: NodeJS.ProcessEnv = process.env): Database
   return resolved;
 }
 
+export function canMigrateDatabase(resolved: DatabaseUrls) {
+  return Boolean(resolved.pooled && resolved.direct);
+}
+
+export function hasPooledDatabaseUrl(env: EnvLike = process.env) {
+  return Boolean(firstEnv(env, POOLED_ENV_NAMES));
+}
+
+export function databaseReady(env: EnvLike = process.env) {
+  if (env === process.env) applyDatabaseEnv();
+  return hasPooledDatabaseUrl(env);
+}
+
 export function assertDatabaseEnv(env: NodeJS.ProcessEnv = process.env): DatabaseUrls {
   const resolved = applyDatabaseEnv(env);
-  if (!resolved.pooled || !resolved.direct) {
+  if (!canMigrateDatabase(resolved)) {
     throw new Error(MISSING_DATABASE_MESSAGE);
   }
   return resolved;
+}
+
+export function databaseConfigured(env: EnvLike = process.env) {
+  const resolved = env === process.env ? applyDatabaseEnv() : resolveDatabaseUrls(env);
+  return canMigrateDatabase(resolved);
 }

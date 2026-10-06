@@ -2,7 +2,7 @@
 
 Do these steps once, in the Vercel project. You do not install anything on your computer, and you do not copy database passwords or photo keys.
 
-The first deploy creates the tables and a demo shop. Later deploys keep what is already there.
+The deploy that runs after Neon is connected creates the tables and a demo shop. Later deploys keep what is already there. If you open the site before the database is connected, the page lists these steps instead of showing an error code.
 
 ## 1. Open the project
 

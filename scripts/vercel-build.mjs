@@ -1,7 +1,13 @@
-import { prepareDatabaseEnv, runCommand } from "./database-process.mjs";
+import { databaseReadyForMigrations, runCommand } from "./database-process.mjs";
+import { tsImport } from "tsx/esm/api";
 
-await prepareDatabaseEnv();
+const ready = await databaseReadyForMigrations();
 runCommand(["npx", "prisma", "generate"]);
-runCommand(["npx", "prisma", "migrate", "deploy"]);
-runCommand(["npx", "tsx", "prisma/seed.ts"]);
+if (!ready) {
+  const { MIGRATION_SKIP_MESSAGE } = await tsImport("../src/lib/database-url.ts", import.meta.url);
+  console.log(MIGRATION_SKIP_MESSAGE);
+} else {
+  runCommand(["npx", "prisma", "migrate", "deploy"]);
+  runCommand(["npx", "tsx", "prisma/seed.ts"]);
+}
 runCommand(["npx", "next", "build"]);
