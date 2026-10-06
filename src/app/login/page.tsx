@@ -7,7 +7,7 @@ import { BRAND_NAME, LEGAL_NAME, PRODUCT_NAME } from "@/lib/constants";
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; next?: string }>;
+  searchParams: Promise<{ error?: string; next?: string; config?: string }>;
 }) {
   const params = await searchParams;
 
@@ -38,6 +38,11 @@ export default async function LoginPage({
               Use your Hail Ops email. Seeded demo accounts are in the README.
             </p>
           </div>
+          {params.config ? (
+            <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {params.config}
+            </p>
+          ) : null}
           {params.error ? (
             <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
               Email or password did not match.

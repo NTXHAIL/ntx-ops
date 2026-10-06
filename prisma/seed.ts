@@ -1,9 +1,12 @@
 import {
+  Prisma,
   PrismaClient,
   type EstimateStatus,
   type LineItemType,
 } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { applyDatabaseEnv } from "../src/lib/database-url";
+import { shouldSeedDemoData } from "../src/lib/seed-policy";
 import { buildStateFarmMatrixRows, CARRIER_SEED } from "../src/lib/hailspec-matrix";
 import {
   calculateCustomLine,
@@ -16,19 +19,46 @@ import {
 import { DEFAULT_STORM_OFFER, SMS_CONSENT_TEXT, SMS_CONSENT_VERSION } from "../src/lib/storms/consent";
 import { loadZipCentroids } from "../src/lib/storms/zips";
 
+applyDatabaseEnv();
+
+const directUrl = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+if (!directUrl) {
+  throw new Error("Database is not configured. Set DATABASE_URL before seeding.");
+}
+
 const prisma = new PrismaClient({
   datasources: {
     db: {
-      url: process.env.DIRECT_URL || process.env.DATABASE_URL,
+      url: directUrl,
     },
   },
 });
 
+let db: PrismaClient | Prisma.TransactionClient = prisma;
+
 async function main() {
+  const userCount = await prisma.user.count();
+  if (!shouldSeedDemoData(userCount)) {
+    console.log(
+      "Database already has users. Skipping demo seed so existing shop data is left alone.",
+    );
+    return;
+  }
+
+  await prisma.$transaction(
+    async (tx) => {
+      db = tx;
+      await seedEmptyDatabase();
+    },
+    { maxWait: 15_000, timeout: 180_000 },
+  );
+}
+
+async function seedEmptyDatabase() {
   const adminHash = await bcrypt.hash("HailOps!admin", 10);
   const estimatorHash = await bcrypt.hash("HailOps!est", 10);
 
-  const admin = await prisma.user.upsert({
+  const admin = await db.user.upsert({
     where: { email: "admin@ntxhail.local" },
     update: { name: "Alex Rivera", role: "ADMIN", passwordHash: adminHash },
     create: {
@@ -39,7 +69,7 @@ async function main() {
     },
   });
 
-  const estimator = await prisma.user.upsert({
+  const estimator = await db.user.upsert({
     where: { email: "estimator@ntxhail.local" },
     update: {
       name: "Jordan Hale",
@@ -54,7 +84,7 @@ async function main() {
     },
   });
 
-  await prisma.shopSettings.upsert({
+  await db.shopSettings.upsert({
     where: { id: "default" },
     update: {},
     create: {
@@ -77,7 +107,7 @@ async function main() {
   ];
 
   for (const rule of markupSeeds) {
-    await prisma.markupRule.upsert({
+    await db.markupRule.upsert({
       where: { code: rule.code },
       update: { name: rule.name, percent: rule.percent, isActive: true },
       create: rule,
@@ -85,7 +115,7 @@ async function main() {
   }
 
   for (const carrier of CARRIER_SEED) {
-    await prisma.pdrMatrix.upsert({
+    await db.pdrMatrix.upsert({
       where: { carrierId: carrier.id },
       update: { name: carrier.name, isStub: carrier.isStub, isActive: !carrier.isStub },
       create: {
@@ -97,21 +127,21 @@ async function main() {
     });
   }
 
-  const matrix = await prisma.pdrMatrix.findUniqueOrThrow({
+  const matrix = await db.pdrMatrix.findUniqueOrThrow({
     where: { carrierId: "state_farm" },
   });
-  const sfHood = await prisma.pdrMatrixRow.findFirst({
+  const sfHood = await db.pdrMatrixRow.findFirst({
     where: { matrixId: matrix.id, panelCode: "HOOD", minDents: 16, dimeCents: 20000 },
   });
-  const staleShopCodes = await prisma.pdrMatrixRow.findFirst({
+  const staleShopCodes = await db.pdrMatrixRow.findFirst({
     where: {
       matrixId: matrix.id,
       panelCode: { in: ["FENDER_LF", "DECK", "DOOR_LF", "ROOF_RAIL_L"] },
     },
   });
   if (!sfHood || staleShopCodes) {
-    await prisma.pdrMatrixRow.deleteMany({ where: { matrixId: matrix.id } });
-    await prisma.pdrMatrixRow.createMany({
+    await db.pdrMatrixRow.deleteMany({ where: { matrixId: matrix.id } });
+    await db.pdrMatrixRow.createMany({
       data: buildStateFarmMatrixRows().map((row) => ({ ...row, matrixId: matrix.id })),
     });
   }
@@ -136,20 +166,20 @@ async function main() {
   ];
 
   for (const item of laborTimes) {
-    const existing = await prisma.laborTime.findFirst({ where: { name: item.name } });
+    const existing = await db.laborTime.findFirst({ where: { name: item.name } });
     if (!existing) {
-      await prisma.laborTime.create({
+      await db.laborTime.create({
         data: { ...item, defaultRateId: shopRate.id, isActive: true },
       });
     }
   }
 
-  await prisma.estimate.updateMany({
+  await db.estimate.updateMany({
     where: { estimateNumber: { in: ["EST-1002", "EST-1003"] } },
     data: { bodyStyle: "TRUCK" },
   });
 
-  const existingDemo = await prisma.estimate.findUnique({
+  const existingDemo = await db.estimate.findUnique({
     where: { estimateNumber: "EST-1001" },
   });
   if (existingDemo) {
@@ -158,7 +188,7 @@ async function main() {
     return;
   }
 
-  const whitaker = await prisma.customer.create({
+  const whitaker = await db.customer.create({
     data: {
       name: "James Whitaker",
       phonePrimary: "2145550188",
@@ -190,7 +220,7 @@ async function main() {
     include: { vehicles: true },
   });
 
-  const delgado = await prisma.customer.create({
+  const delgado = await db.customer.create({
     data: {
       name: "Maria Delgado",
       phonePrimary: "9725550142",
@@ -216,7 +246,7 @@ async function main() {
     include: { vehicles: true },
   });
 
-  const fleet = await prisma.customer.create({
+  const fleet = await db.customer.create({
     data: {
       name: "North Texas Fleet Services",
       phonePrimary: "8175550190",
@@ -246,7 +276,7 @@ async function main() {
   const camry = delgado.vehicles[0];
   const silverado = fleet.vehicles[0];
 
-  const claim = await prisma.claim.create({
+  const claim = await db.claim.create({
     data: {
       claimNumber: "TX-HL-88421",
       insuranceCarrier: "State Farm",
@@ -262,17 +292,17 @@ async function main() {
     },
   });
 
-  const matrixRows = await prisma.pdrMatrixRow.findMany({
+  const matrixRows = await db.pdrMatrixRow.findMany({
     where: { matrixId: matrix.id },
   });
-  const markupRules = await prisma.markupRule.findMany({ where: { isActive: true } });
-  const settings = await prisma.shopSettings.findUniqueOrThrow({
+  const markupRules = await db.markupRule.findMany({ where: { isActive: true } });
+  const settings = await db.shopSettings.findUniqueOrThrow({
     where: { id: "default" },
   });
-  const headliner = await prisma.laborTime.findFirstOrThrow({
+  const headliner = await db.laborTime.findFirstOrThrow({
     where: { name: "Headliner R&I" },
   });
-  const moldings = await prisma.laborTime.findFirstOrThrow({
+  const moldings = await db.laborTime.findFirstOrThrow({
     where: { name: "Roof moldings R&I" },
   });
 
@@ -462,7 +492,7 @@ async function seedStorms() {
       .map((zip) => centroids.find((row) => row.zip === zip))
       .filter((row): row is NonNullable<typeof row> => Boolean(row));
 
-  const approved = await prisma.storm.upsert({
+  const approved = await db.storm.upsert({
     where: { slug: "2026-04-28-dallas-fort-worth" },
     update: { status: "APPROVED" },
     create: {
@@ -477,9 +507,9 @@ async function seedStorms() {
       offerText: DEFAULT_STORM_OFFER,
     },
   });
-  if ((await prisma.stormZip.count({ where: { stormId: approved.id } })) === 0) {
+  if ((await db.stormZip.count({ where: { stormId: approved.id } })) === 0) {
     const zips = pick(["75034", "75035", "75070", "75093", "75078", "75201", "76051", "75024"]);
-    await prisma.stormZip.createMany({
+    await db.stormZip.createMany({
       data: zips.map((zip, index) => ({
         stormId: approved.id,
         zip: zip.zip,
@@ -493,7 +523,7 @@ async function seedStorms() {
     });
   }
 
-  const detected = await prisma.storm.upsert({
+  const detected = await db.storm.upsert({
     where: { slug: "2026-05-10-quitman-hawkins" },
     update: {},
     create: {
@@ -507,9 +537,9 @@ async function seedStorms() {
       offerText: DEFAULT_STORM_OFFER,
     },
   });
-  if ((await prisma.stormZip.count({ where: { stormId: detected.id } })) === 0) {
+  if ((await db.stormZip.count({ where: { stormId: detected.id } })) === 0) {
     const zips = pick(["75783", "75765", "75773", "75497"]);
-    await prisma.stormZip.createMany({
+    await db.stormZip.createMany({
       data: zips.map((zip, index) => ({
         stormId: detected.id,
         zip: zip.zip,
@@ -523,7 +553,7 @@ async function seedStorms() {
     });
   }
 
-  const closed = await prisma.storm.upsert({
+  const closed = await db.storm.upsert({
     where: { slug: "2025-11-02-okc-metro" },
     update: {},
     create: {
@@ -537,9 +567,9 @@ async function seedStorms() {
       offerText: DEFAULT_STORM_OFFER,
     },
   });
-  if ((await prisma.stormZip.count({ where: { stormId: closed.id } })) === 0) {
+  if ((await db.stormZip.count({ where: { stormId: closed.id } })) === 0) {
     const zips = pick(["73102", "73116", "73013"]);
-    await prisma.stormZip.createMany({
+    await db.stormZip.createMany({
       data: zips.map((zip) => ({
         stormId: closed.id,
         zip: zip.zip,
@@ -553,8 +583,8 @@ async function seedStorms() {
     });
   }
 
-  if ((await prisma.lead.count({ where: { stormId: approved.id } })) === 0) {
-    const casey = await prisma.customer.upsert({
+  if ((await db.lead.count({ where: { stormId: approved.id } })) === 0) {
+    const casey = await db.customer.upsert({
       where: { id: "seed-lead-casey" },
       update: {},
       create: {
@@ -568,7 +598,7 @@ async function seedStorms() {
         notes: "Storm lead (seed)",
       },
     });
-    await prisma.lead.create({
+    await db.lead.create({
       data: {
         stormId: approved.id,
         customerId: casey.id,
@@ -706,7 +736,7 @@ async function createSeedEstimate(input: {
 
   const totals = calculateEstimateTotals(calculated);
 
-  await prisma.estimate.create({
+  await db.estimate.create({
     data: {
       estimateNumber: input.estimateNumber,
       status: input.status,
@@ -728,14 +758,14 @@ async function upsertRate(
   amountCents: number,
   isDefault: boolean,
 ) {
-  const existing = await prisma.laborRate.findFirst({ where: { name } });
+  const existing = await db.laborRate.findFirst({ where: { name } });
   if (existing) {
-    return prisma.laborRate.update({
+    return db.laborRate.update({
       where: { id: existing.id },
       data: { type, amountCents, isDefault, isActive: true },
     });
   }
-  return prisma.laborRate.create({
+  return db.laborRate.create({
     data: { name, type, amountCents, isDefault, isActive: true },
   });
 }

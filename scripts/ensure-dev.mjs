@@ -1,11 +1,12 @@
 import { copyFileSync, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { prepareDatabaseEnv, runCommand } from "./database-process.mjs";
 
 if (!existsSync(".env")) {
   copyFileSync(".env.example", ".env");
   console.log("Created .env from .env.example");
 }
 
-execSync("npx prisma generate", { stdio: "inherit" });
-execSync("npx prisma migrate deploy", { stdio: "inherit" });
-execSync("npx tsx prisma/seed.ts", { stdio: "inherit" });
+await prepareDatabaseEnv();
+runCommand(["npx", "prisma", "generate"]);
+runCommand(["npx", "prisma", "migrate", "deploy"]);
+runCommand(["npx", "tsx", "prisma/seed.ts"]);

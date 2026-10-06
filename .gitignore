@@ -39,7 +39,7 @@ yarn-error.log*
 .env.*.local
 !.env.example
 
-# sqlite leftovers and local photo fallback (used only when Supabase is unset)
+# sqlite leftovers and local photo fallback (used only when Blob is unset)
 /prisma/*.db
 /prisma/*.db-journal
 /.data/

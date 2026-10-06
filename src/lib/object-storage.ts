@@ -1,16 +1,34 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
+import { del, get, put } from "@vercel/blob";
 
-const DEFAULT_BUCKET = "estimate-photos";
+type BlobAccess = "private" | "public";
 
-let bucketReady = false;
+const MISSING_BLOB_MESSAGE =
+  "Photo storage is not configured. In the Vercel project, open the Storage tab, create a Blob store, and connect it to this project so BLOB_READ_WRITE_TOKEN is set. Then redeploy.";
 
-export function usesSupabaseStorage() {
-  return Boolean(process.env.SUPABASE_URL?.trim() && process.env.SUPABASE_SERVICE_ROLE_KEY?.trim());
+let blobAccess: BlobAccess | null = null;
+
+export function resetBlobStorageForTests() {
+  blobAccess = null;
 }
 
-export function storageBucket() {
-  return process.env.SUPABASE_STORAGE_BUCKET?.trim() || DEFAULT_BUCKET;
+function envValue(name: string) {
+  return process.env[name]?.trim() || "";
+}
+
+export function usesBlobStorage() {
+  return Boolean(envValue("BLOB_READ_WRITE_TOKEN") || envValue("BLOB_STORE_ID"));
+}
+
+export function alternateBlobAccess(attempted: BlobAccess, error: unknown): BlobAccess | null {
+  if (!(error instanceof Error)) return null;
+  const message = error.message.toLowerCase();
+  if (message.includes("valid token") || message.includes("access denied")) return null;
+  const other: BlobAccess = attempted === "private" ? "public" : "private";
+  const talksAboutAccess = message.includes("access") || message.includes("store");
+  if (!talksAboutAccess || !message.includes(other)) return null;
+  return other;
 }
 
 export function storageKeyFromPublicPath(publicPath: string) {
@@ -50,21 +68,8 @@ export function contentTypeForPath(publicPath: string) {
 export async function putStoredObject(publicPath: string, bytes: Buffer, contentType: string) {
   const key = storageKeyFromPublicPath(publicPath);
   if (!key) throw new Error("Invalid photo path.");
-  if (usesSupabaseStorage()) {
-    await ensureSupabaseBucket();
-    const response = await fetch(objectUrl(key), {
-      method: "POST",
-      headers: {
-        ...supabaseHeaders(),
-        "Content-Type": contentType || contentTypeForPath(publicPath),
-        "x-upsert": "true",
-      },
-      body: new Uint8Array(bytes),
-    });
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`Could not store photo (${response.status}). ${detail}`.trim());
-    }
+  if (usesBlobStorage()) {
+    await putBlob(key, bytes, contentType || contentTypeForPath(publicPath));
     return;
   }
   const file = localFile(key);
@@ -75,18 +80,7 @@ export async function putStoredObject(publicPath: string, bytes: Buffer, content
 export async function readStoredObject(publicPath: string) {
   const key = storageKeyFromPublicPath(publicPath);
   if (!key) return null;
-  if (usesSupabaseStorage()) {
-    const response = await fetch(objectUrl(key), { headers: supabaseHeaders() });
-    if (response.status === 404 || response.status === 400) return null;
-    if (!response.ok) {
-      throw new Error(`Could not read photo (${response.status}).`);
-    }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    const contentType =
-      response.headers.get("content-type")?.split(";")[0]?.trim() ||
-      contentTypeForPath(publicPath);
-    return { bytes, contentType };
-  }
+  if (usesBlobStorage()) return readBlob(key, publicPath);
   try {
     const bytes = new Uint8Array(await readFile(localFile(key)));
     return { bytes, contentType: contentTypeForPath(publicPath) };
@@ -99,60 +93,91 @@ export async function readStoredObject(publicPath: string) {
 export async function deleteStoredObject(publicPath: string) {
   const key = storageKeyFromPublicPath(publicPath);
   if (!key) return;
-  if (usesSupabaseStorage()) {
-    const response = await fetch(objectUrl(key), {
-      method: "DELETE",
-      headers: supabaseHeaders(),
-    });
-    if (response.ok || response.status === 404) return;
+  if (usesBlobStorage()) {
+    await deleteBlob(key);
     return;
   }
   await rm(localFile(key), { force: true });
 }
 
-function supabaseHeaders() {
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || "";
-  return {
-    Authorization: `Bearer ${key}`,
-    apikey: key,
-  };
+function blobToken() {
+  const token = envValue("BLOB_READ_WRITE_TOKEN");
+  return token ? { token } : {};
 }
 
-function objectUrl(key: string) {
-  const base = process.env.SUPABASE_URL?.trim().replace(/\/$/, "") || "";
-  const encoded = key.split("/").map(encodeURIComponent).join("/");
-  return `${base}/storage/v1/object/${encodeURIComponent(storageBucket())}/${encoded}`;
+async function putBlob(key: string, bytes: Buffer, contentType: string) {
+  const preferred = blobAccess ?? "private";
+  try {
+    await writeBlob(key, bytes, contentType, preferred);
+    blobAccess = preferred;
+  } catch (error) {
+    const other = alternateBlobAccess(preferred, error);
+    if (!other) throw error;
+    await writeBlob(key, bytes, contentType, other);
+    blobAccess = other;
+  }
 }
 
-async function ensureSupabaseBucket() {
-  if (bucketReady) return;
-  const base = process.env.SUPABASE_URL?.trim().replace(/\/$/, "") || "";
-  const bucket = storageBucket();
-  const response = await fetch(`${base}/storage/v1/bucket`, {
-    method: "POST",
-    headers: {
-      ...supabaseHeaders(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ id: bucket, name: bucket, public: false }),
+async function writeBlob(key: string, bytes: Buffer, contentType: string, access: BlobAccess) {
+  await put(key, bytes, {
+    access,
+    contentType,
+    addRandomSuffix: false,
+    allowOverwrite: true,
+    ...blobToken(),
   });
-  if (response.ok || response.status === 409) {
-    bucketReady = true;
-    return;
+}
+
+async function readBlob(key: string, publicPath: string) {
+  const order: BlobAccess[] = blobAccess ? [blobAccess] : ["private", "public"];
+  for (const access of order) {
+    try {
+      const result = await get(key, { access, ...blobToken() });
+      if (!result || result.statusCode !== 200 || !result.stream) {
+        if (!blobAccess && access === "private") continue;
+        return null;
+      }
+      blobAccess = access;
+      const bytes = new Uint8Array(await new Response(result.stream).arrayBuffer());
+      const contentType = result.blob.contentType || contentTypeForPath(publicPath);
+      return { bytes, contentType };
+    } catch (error) {
+      const other = alternateBlobAccess(access, error);
+      if (other && !blobAccess) continue;
+      throw error;
+    }
   }
-  const detail = await response.text().catch(() => "");
-  if (/already exists/i.test(detail)) {
-    bucketReady = true;
-    return;
+  return null;
+}
+
+async function deleteBlob(key: string) {
+  const order: BlobAccess[] = blobAccess ? [blobAccess] : ["private", "public"];
+  let lastError: unknown;
+  for (const access of order) {
+    try {
+      await del(key, blobToken());
+      blobAccess = access;
+      return;
+    } catch (error) {
+      if (isMissingBlob(error)) return;
+      const other = alternateBlobAccess(access, error);
+      if (other && !blobAccess) {
+        lastError = error;
+        continue;
+      }
+      throw error;
+    }
   }
-  throw new Error(`Could not create the photo bucket (${response.status}). ${detail}`.trim());
+  if (lastError) throw lastError;
+}
+
+function isMissingBlob(error: unknown) {
+  return error instanceof Error && /does not exist|not found/i.test(error.message);
 }
 
 function localRoot() {
-  if (process.env.NODE_ENV === "production" && !usesSupabaseStorage()) {
-    throw new Error(
-      "Photo storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
-    );
+  if (process.env.NODE_ENV === "production" && !usesBlobStorage()) {
+    throw new Error(MISSING_BLOB_MESSAGE);
   }
   return resolve(process.cwd(), ".data", "object-storage");
 }
