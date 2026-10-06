@@ -31,7 +31,7 @@ Documented so the shop does not expect these yet:
 
 ## Stack
 
-Next.js (App Router) + TypeScript + Tailwind + shadcn/ui, Prisma, and PostgreSQL. Production runs on Vercel with Supabase (database + private photo storage). See [DEPLOY.md](DEPLOY.md) for the click-by-click setup.
+Next.js (App Router) + TypeScript + Tailwind + shadcn/ui, Prisma, and PostgreSQL. Production runs on Vercel with Neon Postgres (from the Storage tab) and Vercel Blob for photos. See [DEPLOY.md](DEPLOY.md) for the click-by-click setup.
 
 ## Setup
 
@@ -41,7 +41,7 @@ cp .env.example .env
 npm run dev
 ```
 
-`npm run dev` generates the Prisma client, applies migrations, and seeds catalogs plus sample records. Point `DATABASE_URL` and `DIRECT_URL` at a Postgres database first (local Postgres, or the Supabase addresses in DEPLOY.md). The sample values in `.env.example` expect Postgres on `localhost:5432`, database `hailops`, user `hailops`, password `hailops`.
+`npm run dev` generates the Prisma client, applies migrations, and seeds demo data when the database has no users. Point `DATABASE_URL` at Postgres first. `DATABASE_URL_UNPOOLED` is the direct URL Prisma Migrate uses; locally it can be the same address. The sample values in `.env.example` expect Postgres on `localhost:5432`, database `hailops`, user `hailops`, password `hailops`. On Vercel, the Neon integration sets both variables.
 
 The app listens on [http://127.0.0.1:43147](http://127.0.0.1:43147).
 
@@ -49,11 +49,11 @@ The app listens on [http://127.0.0.1:43147](http://127.0.0.1:43147).
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Pooled Postgres URL (Supabase port 6543 with `pgbouncer=true`). |
-| `DIRECT_URL` | Direct Postgres URL (port 5432) for migrations and seed. |
-| `AUTH_SECRET` | Signs the session cookie. Required in production. |
-| `SUPABASE_URL` | Supabase project URL. Required on Vercel for photos. |
-| `SUPABASE_SERVICE_ROLE_KEY` | Server-only key used to upload photos. Required on Vercel. |
+| `DATABASE_URL` | Pooled Postgres URL. Neon sets this when the database is connected in Vercel Storage. |
+| `DATABASE_URL_UNPOOLED` | Direct Postgres URL. Prisma Migrate uses it. Neon sets this too. |
+| `POSTGRES_PRISMA_URL` / `POSTGRES_URL_NON_POOLING` | Older Vercel Postgres names. Used only when the `DATABASE_URL` pair is unset. |
+| `AUTH_SECRET` | Signs the session cookie. Required in production (32+ characters). The `.env.example` placeholder is rejected. |
+| `BLOB_READ_WRITE_TOKEN` | Set when a Blob store is connected. Leave unset locally to keep photos in `.data`. |
 | `NHTSA_VPIC_URL` | Optional. Override the public NHTSA vPIC decode endpoint. No API key. |
 | `STAFF_NOTIFY_EMAIL` | Inbox for new-lead staff mail. Defaults to `admin@ntxhail.local`. |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | Optional SMTP transport. If `SMTP_HOST` is unset, Hail Ops logs the staff email to the console. |
@@ -80,9 +80,9 @@ Seeded shop data includes three customers, one State Farm claim, three estimates
 | `npm test` | Pricing math tests (State Farm lookup, add-ons, R&R / Conventional / R&I, report lines) |
 | `npm run test:e2e` | Playwright: key pages at 390 / 768 / 1440px have no horizontal overflow; save bar and panel-editor footer stay in view |
 | `npm run lint` | ESLint |
-| `npm run build` | Production build |
-| `npm run db:setup` | Apply migrations and seed (one-time deploy command) |
-| `npm run db:seed` | Re-run the idempotent seed |
+| `npm run build` | When a database URL is set: migrate, seed if the database is empty, then build. When it is missing: skip migrate and seed so the deploy can finish |
+| `npm run db:setup` | Apply migrations and seed when the database has no users |
+| `npm run db:seed` | Seed demo data only when the database has no users |
 | `npm run db:studio` | Prisma Studio |
 | `npm run storms:ingest` | Pull SPC / NWS hail reports for TX/OK/AR/MO, cluster storms, map ZIPs |
 

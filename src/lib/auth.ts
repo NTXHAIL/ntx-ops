@@ -2,6 +2,7 @@ import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import bcrypt from "bcryptjs";
 import { jwtVerify, SignJWT } from "jose";
+import { authSecretKey } from "@/lib/auth-secret";
 import { prisma } from "@/lib/db";
 import { SESSION_COOKIE, sessionCookieOptions } from "@/lib/session";
 import type { Role } from "@prisma/client";
@@ -16,13 +17,7 @@ export type SessionUser = {
 };
 
 function secret() {
-  const value = process.env.AUTH_SECRET?.trim();
-  const placeholder = "replace-with-a-long-random-string";
-  const usable = Boolean(value && value !== placeholder && value.length >= 16);
-  if (process.env.NODE_ENV === "production" && !usable) {
-    throw new Error("Set AUTH_SECRET to a long random string before deploying.");
-  }
-  return new TextEncoder().encode(usable && value ? value : "dev-insecure-hail-ops-secret");
+  return authSecretKey();
 }
 
 export async function createSession(user: SessionUser) {
