@@ -1,7 +1,5 @@
 "use server";
 
-import { mkdir, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -23,6 +21,12 @@ import {
   type CalculatedLine,
 } from "@/lib/estimate-calc";
 import { normalizePhotoSlot } from "@/lib/estimate-photos";
+import {
+  deleteStoredObject,
+  estimatePhotoPath,
+  isEstimatePhotoPath,
+  putStoredObject,
+} from "@/lib/object-storage";
 import type { EstimateDraftLine, EstimateDraftPayload } from "@/lib/estimate-types";
 import { DEFAULT_LABOR_RATE_CENTS } from "@/lib/hailspec";
 import { getCarrierMatrices, getShopCatalog, nextStatusOptions } from "@/lib/queries";
@@ -256,7 +260,14 @@ export async function deleteEstimateAction(id: string) {
   if (user.role !== "ADMIN" && estimate.createdById !== user.id) {
     return { error: "You cannot delete that estimate." };
   }
+  const photos = await prisma.estimatePhoto.findMany({
+    where: { estimateId: id },
+    select: { path: true },
+  });
   await prisma.estimate.delete({ where: { id } });
+  for (const photo of photos) {
+    await deleteStoredObject(photo.path).catch(() => undefined);
+  }
   revalidatePath("/estimates");
   return { ok: true };
 }
@@ -273,7 +284,6 @@ async function persistEstimatePhotos(
     slot: string;
     panelCode: string;
   }[] = [];
-  const dir = join(process.cwd(), "public", "estimate-photos", estimateId);
   for (const [index, photo] of photos.entries()) {
     const slot = normalizePhotoSlot(photo.slot);
     const panelCode = slot === "PANEL" ? (photo.panelCode || "").slice(0, 40) : "";
@@ -295,11 +305,11 @@ async function persistEstimatePhotos(
     if (!match) continue;
     const ext = match[1].includes("png") ? "png" : match[1].includes("webp") ? "webp" : "jpg";
     const fileName = `${randomUUID()}.${ext}`;
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, fileName), Buffer.from(match[2], "base64"));
+    const path = estimatePhotoPath(estimateId, fileName);
+    await putStoredObject(path, Buffer.from(match[2], "base64"), match[1]);
     kept.push({
       clientKey: photo.clientKey || `${slot}-${index}`,
-      path: `/estimate-photos/${estimateId}/${fileName}`,
+      path,
       name,
       label,
       slot,
@@ -352,21 +362,12 @@ async function persistPhotoFields(
 }
 
 function isOwnPhotoPath(path: string, estimateId: string) {
-  return path.startsWith(`/estimate-photos/${estimateId}/`) && !path.includes("..");
+  return isEstimatePhotoPath(path, estimateId);
 }
 
 async function removeStoredPhoto(path: string, estimateId: string) {
   if (!isOwnPhotoPath(path, estimateId)) return;
-  const fileName = path.slice(`/estimate-photos/${estimateId}/`.length);
-  if (!fileName || fileName.includes("/")) return;
-  await unlink(join(process.cwd(), "public", "estimate-photos", estimateId, fileName)).catch(
-    () => undefined,
-  );
-  const dir = join(process.cwd(), "public", "estimate-photos", estimateId);
-  const left = await readdir(dir).catch(() => []);
-  if (left.length === 0) {
-    await rmdir(dir).catch(() => undefined);
-  }
+  await deleteStoredObject(path).catch(() => undefined);
 }
 
 export async function updateEstimateStatusAction(formData: FormData) {

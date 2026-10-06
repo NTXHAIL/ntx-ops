@@ -16,7 +16,13 @@ import {
 import { DEFAULT_STORM_OFFER, SMS_CONSENT_TEXT, SMS_CONSENT_VERSION } from "../src/lib/storms/consent";
 import { loadZipCentroids } from "../src/lib/storms/zips";
 
-const prisma = new PrismaClient();
+const prisma = new PrismaClient({
+  datasources: {
+    db: {
+      url: process.env.DIRECT_URL || process.env.DATABASE_URL,
+    },
+  },
+});
 
 async function main() {
   const adminHash = await bcrypt.hash("HailOps!admin", 10);

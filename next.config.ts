@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
     serverActions: {
       bodySizeLimit: "16mb",
     },
+    // Proxy buffers the request body. Keep this aligned with photo uploads.
+    proxyClientMaxBodySize: "16mb",
   },
 };
 

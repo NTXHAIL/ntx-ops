@@ -39,9 +39,10 @@ yarn-error.log*
 .env.*.local
 !.env.example
 
-# sqlite
+# sqlite leftovers and local photo fallback (used only when Supabase is unset)
 /prisma/*.db
 /prisma/*.db-journal
+/.data/
 
 # uploaded storm-lead photos (keep the folder)
 /public/lead-photos/*

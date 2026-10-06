@@ -1,7 +1,5 @@
 "use server";
 
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
@@ -11,6 +9,7 @@ import { prisma } from "@/lib/db";
 import { text } from "@/lib/form-data";
 import { consentProof, leadSubmissionSchema, normalizePhone } from "@/lib/leads";
 import { notifyStaffNewLead } from "@/lib/mailer";
+import { leadPhotoPath, putStoredObject } from "@/lib/object-storage";
 import type { LeadStatus } from "@prisma/client";
 
 function clientIp(headerStore: Headers) {
@@ -25,11 +24,10 @@ async function savePhoto(file: File | null) {
   if (!file.type.startsWith("image/")) return null;
   const ext = file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
   const name = `${randomUUID()}.${ext}`;
-  const dir = join(process.cwd(), "public", "lead-photos");
-  await mkdir(dir, { recursive: true });
+  const path = leadPhotoPath(name);
   const buffer = Buffer.from(await file.arrayBuffer());
-  await writeFile(join(dir, name), buffer);
-  return `/lead-photos/${name}`;
+  await putStoredObject(path, buffer, file.type || "image/jpeg");
+  return path;
 }
 
 export async function submitStormLeadAction(formData: FormData) {

@@ -35,6 +35,7 @@ import {
   type PhotoSlot,
 } from "@/lib/estimate-photos";
 import type { EstimateDraftLine, EstimateDraftPayload } from "@/lib/estimate-types";
+import { photoNeedsUpload, uploadEstimatePhoto } from "@/lib/upload-estimate-photo";
 import { formatMoney, formatVehicle } from "@/lib/format";
 import {
   DEFAULT_LABOR_RATE_CENTS,
@@ -405,8 +406,18 @@ export function EstimateEditor({
         setSaveState("saving");
         const savingShownAt = Date.now();
         const signature = draftSignature(draft);
-        const result = await saveEstimateAction({
-          id: idAtStart,
+        const toPhotoPayload = (photo: DraftPhoto) => ({
+          clientKey: photo.key,
+          path: photo.path,
+          name: photo.name,
+          label: photo.label,
+          slot: photo.slot,
+          panelCode: photo.panelCode,
+          dataUrl: photo.path
+            ? undefined
+            : photo.dataUrl || (photo.url.startsWith("data:") ? photo.url : undefined),
+        });
+        const payloadBase = {
           customerId: draft.customerId,
           vehicleId: draft.vehicleId || null,
           claimId: draft.claimId || null,
@@ -427,15 +438,6 @@ export function EstimateEditor({
             draft.vehicleFields.model
               ? draft.vehicleFields
               : null,
-          photos: draft.photos.map((photo) => ({
-            clientKey: photo.key,
-            path: photo.path,
-            name: photo.name,
-            label: photo.label,
-            slot: photo.slot,
-            panelCode: photo.panelCode,
-            dataUrl: photo.dataUrl || (photo.url.startsWith("data:") ? photo.url : undefined),
-          })),
           photoFields: Object.entries(draft.fieldLabels).flatMap(([key, label]) => {
             const splitAt = key.indexOf(":");
             const slot = key.slice(0, splitAt);
@@ -446,6 +448,45 @@ export function EstimateEditor({
             }
             return [{ slot, panelCode, label: trimmed }];
           }),
+        };
+        let id = idAtStart;
+        let photosToSave = draft.photos;
+        if (photosToSave.some(photoNeedsUpload)) {
+          if (!id) {
+            const created = await saveEstimateAction({
+              ...payloadBase,
+              photos: photosToSave.filter((photo) => photo.path && !photoNeedsUpload(photo)).map(toPhotoPayload),
+            });
+            if (!("id" in created)) {
+              setSaveState("error");
+              setError(created.error);
+              return false;
+            }
+            id = created.id;
+            estimateIdRef.current = id;
+            setEstimateId(id);
+          }
+          try {
+            const uploaded = [...photosToSave];
+            for (let index = 0; index < uploaded.length; index += 1) {
+              if (!photoNeedsUpload(uploaded[index])) continue;
+              uploaded[index] = await uploadEstimatePhoto(id, uploaded[index]);
+              photosRef.current = uploaded;
+              if (draftRef.current) {
+                draftRef.current = { ...draftRef.current, photos: uploaded, estimateId: id };
+              }
+            }
+            photosToSave = uploaded;
+          } catch (uploadError) {
+            setSaveState("error");
+            setError(uploadError instanceof Error ? uploadError.message : "Photo upload failed.");
+            return false;
+          }
+        }
+        const result = await saveEstimateAction({
+          ...payloadBase,
+          id,
+          photos: photosToSave.map(toPhotoPayload),
         });
         if (!("id" in result)) {
           setSaveState("error");
