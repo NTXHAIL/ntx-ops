@@ -36,6 +36,7 @@ export function PanelSheet({
   onClose,
   onRemove,
   hasSaved,
+  photoSection,
 }: {
   hsKey: HsKey;
   shopCode: string;
@@ -54,6 +55,7 @@ export function PanelSheet({
   onClose: () => void;
   onRemove: () => void;
   hasSaved: boolean;
+  photoSection?: React.ReactNode;
 }) {
   const ranges = rangesForPanel(rows, shopCode);
   const available = ranges.filter(
@@ -584,6 +586,8 @@ export function PanelSheet({
               ) : null}
             </>
           ) : null}
+
+          {photoSection}
 
           {total > 0 ? (
             <div className="mt-5 rounded-xl border border-blue-200 bg-[#eff6ff] p-4 text-sm">

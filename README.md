@@ -31,7 +31,7 @@ Documented so the shop does not expect these yet:
 
 ## Stack
 
-Next.js (App Router) + TypeScript + Tailwind + shadcn/ui, Prisma, and SQLite. No extra services required for local use.
+Next.js (App Router) + TypeScript + Tailwind + shadcn/ui, Prisma, and PostgreSQL. Production runs on Vercel with Supabase (database + private photo storage). See [DEPLOY.md](DEPLOY.md) for the click-by-click setup.
 
 ## Setup
 
@@ -41,7 +41,7 @@ cp .env.example .env
 npm run dev
 ```
 
-`npm run dev` generates the Prisma client, creates `prisma/dev.db` if needed, and seeds catalogs plus sample records when the database is empty.
+`npm run dev` generates the Prisma client, applies migrations, and seeds catalogs plus sample records. Point `DATABASE_URL` and `DIRECT_URL` at a Postgres database first (local Postgres, or the Supabase addresses in DEPLOY.md). The sample values in `.env.example` expect Postgres on `localhost:5432`, database `hailops`, user `hailops`, password `hailops`.
 
 The app listens on [http://127.0.0.1:43147](http://127.0.0.1:43147).
 
@@ -49,8 +49,11 @@ The app listens on [http://127.0.0.1:43147](http://127.0.0.1:43147).
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Prisma SQLite URL. Default `file:./dev.db` is relative to `/prisma`. |
-| `AUTH_SECRET` | Signs the session cookie. Change it anywhere this is shared. |
+| `DATABASE_URL` | Pooled Postgres URL (Supabase port 6543 with `pgbouncer=true`). |
+| `DIRECT_URL` | Direct Postgres URL (port 5432) for migrations and seed. |
+| `AUTH_SECRET` | Signs the session cookie. Required in production. |
+| `SUPABASE_URL` | Supabase project URL. Required on Vercel for photos. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-only key used to upload photos. Required on Vercel. |
 | `NHTSA_VPIC_URL` | Optional. Override the public NHTSA vPIC decode endpoint. No API key. |
 | `STAFF_NOTIFY_EMAIL` | Inbox for new-lead staff mail. Defaults to `admin@ntxhail.local`. |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | Optional SMTP transport. If `SMTP_HOST` is unset, Hail Ops logs the staff email to the console. |
@@ -78,6 +81,7 @@ Seeded shop data includes three customers, one State Farm claim, three estimates
 | `npm run test:e2e` | Playwright: key pages at 390 / 768 / 1440px have no horizontal overflow; save bar and panel-editor footer stay in view |
 | `npm run lint` | ESLint |
 | `npm run build` | Production build |
+| `npm run db:setup` | Apply migrations and seed (one-time deploy command) |
 | `npm run db:seed` | Re-run the idempotent seed |
 | `npm run db:studio` | Prisma Studio |
 | `npm run storms:ingest` | Pull SPC / NWS hail reports for TX/OK/AR/MO, cluster storms, map ZIPs |

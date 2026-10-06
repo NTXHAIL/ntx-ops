@@ -21,7 +21,8 @@ export default async function EditEstimatePage({
       where: { id },
       include: {
         lineItems: { orderBy: { sortOrder: "asc" } },
-        photos: { orderBy: { createdAt: "asc" } },
+        photos: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
+        photoFields: true,
         customer: true,
         claim: true,
       },
@@ -51,10 +52,19 @@ export default async function EditEstimatePage({
       initial={estimateToDraft(estimate)}
       initialOwner={estimate.customer.name}
       initialClaimNumber={estimate.claim?.claimNumber ?? ""}
+      backHref={estimate.claimId ? `/claims/${estimate.claimId}` : "/estimates"}
       initialPhotos={estimate.photos.map((photo) => ({
         url: photo.path,
         name: photo.name,
         path: photo.path,
+        label: photo.label,
+        slot: photo.slot,
+        panelCode: photo.panelCode,
+      }))}
+      initialPhotoFields={estimate.photoFields.map((field) => ({
+        slot: field.slot,
+        panelCode: field.panelCode,
+        label: field.label,
       }))}
     />
   );

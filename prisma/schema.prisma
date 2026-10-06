@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
@@ -165,6 +166,7 @@ model Estimate {
   createdBy        User            @relation(fields: [createdById], references: [id])
   lineItems        EstimateLineItem[]
   photos           EstimatePhoto[]
+  photoFields      EstimatePhotoField[]
   pdrSubtotalCents Int             @default(0)
   markupCents      Int             @default(0)
   oversizedCents   Int             @default(0)
@@ -215,8 +217,27 @@ model EstimatePhoto {
   estimate   Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
   path       String
   name       String
+  label      String   @default("")
+  slot       String   @default("MISC")
+  panelCode  String   @default("")
+  sortOrder  Int      @default(0)
   createdAt  DateTime @default(now())
 
+  @@index([estimateId])
+  @@index([estimateId, slot, panelCode])
+}
+
+model EstimatePhotoField {
+  id         String   @id @default(cuid())
+  estimateId String
+  estimate   Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  slot       String
+  panelCode  String   @default("")
+  label      String   @default("")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([estimateId, slot, panelCode])
   @@index([estimateId])
 }
 
